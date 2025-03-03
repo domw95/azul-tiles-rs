@@ -1,19 +1,23 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
+use std::fs::File;
+
 use azul_tiles_rs::{
-    gamestate::Gamestate,
-    player::Player,
-    playerboard::{wall::WALL_COLOURS, PlayerBoard},
+    gamestate::{Destination, Gamestate, Move, Source},
+    playerboard::{wall::WALL_COLOURS, PlayerBoard, RowIndex},
+    players::{self, minimax::Minimaxer, nn::MoveSelectNN, SLNNPlayer},
+    runner::MatchUpResult,
     tiles::{Tile, TileGroup},
 };
 use eframe::{egui, egui_glow::painter};
-use egui::{Color32, FontId, Key, Painter, Pos2, Rect, Sense, Stroke, Vec2};
+use egui::{Color32, FontId, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
 
 fn main() -> eframe::Result {
     // env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 1000.0]),
+
         ..Default::default()
     };
     eframe::run_native(
@@ -28,36 +32,75 @@ fn main() -> eframe::Result {
     )
 }
 
+enum Player {
+    Ai(Box<dyn players::Player<2, 6>>),
+    Human,
+}
+
 struct MyApp {
-    name: String,
-    age: u32,
     gs: Gamestate<2, 6>,
 
-    players: [Box<dyn Player<2, 6>>; 2],
+    players: [Player; 2],
 
     /// UI config that changes with screen size
     config: UIConfig,
+    /// Track selection of move for human player
+    selection: Selection,
 }
 
 impl MyApp {
     fn new() -> Self {
-        let mut app = Self::default();
+        Self::default()
+    }
 
-        app
+    fn advance_gamestate(&mut self) {
+        match self.gs.state() {
+            azul_tiles_rs::gamestate::State::RoundActive => {
+                let player = &mut self.players[self.gs.current_player() as usize];
+                if let Player::Ai(player) = player {
+                    let moves = self.gs.get_moves();
+
+                    let m = player.pick_move(&self.gs, moves);
+                    self.gs.play_move(m);
+                }
+            }
+            azul_tiles_rs::gamestate::State::RoundEnd => {
+                self.gs.end_round();
+            }
+            azul_tiles_rs::gamestate::State::GameEnd => (),
+        }
+    }
+}
+
+impl MyApp {}
+
+fn key_to_number(key: &Key) -> Option<usize> {
+    match key {
+        Key::Num0 => Some(0),
+        Key::Num1 => Some(1),
+        Key::Num2 => Some(2),
+        Key::Num3 => Some(3),
+        Key::Num4 => Some(4),
+        Key::Num5 => Some(5),
+        _ => None,
     }
 }
 
 impl Default for MyApp {
     fn default() -> Self {
+        // let (player, _, _): (MoveSelectNN, f64, MatchUpResult) =
+        //     serde_json::from_reader(File::open("move_select_nn.json").unwrap()).unwrap();
+        let player = Minimaxer {};
         Self {
-            name: "Arthur".to_owned(),
-            age: 42,
-            gs: Gamestate::new_2_player(),
+            gs: Gamestate::new_2_player_with_seed(rand::random(), 0),
             config: UIConfig::default(),
             players: [
-                Box::new(azul_tiles_rs::player::MoveRankPlayer),
-                Box::new(azul_tiles_rs::player::MoveRankPlayer),
+                Player::Human,
+                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer)),
+                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
+                Player::Ai(Box::new(player)),
             ],
+            selection: Selection::default(),
         }
     }
 }
@@ -68,26 +111,205 @@ impl eframe::App for MyApp {
             let window_size = ui.available_size();
             self.config.update(&window_size);
 
-            ctx.input(|input| {
-                if input.key_pressed(Key::Space) {
-                    match self.gs.state() {
-                        azul_tiles_rs::gamestate::State::RoundActive => {
-                            let moves = self.gs.get_moves();
-                            let player = &mut self.players[self.gs.current_player() as usize];
-                            let m = player.pick_move(&self.gs, moves);
-                            self.gs.play_move(m);
-                        }
-                        azul_tiles_rs::gamestate::State::RoundEnd => {
-                            self.gs.end_round();
-                        }
-                        azul_tiles_rs::gamestate::State::GameEnd => (),
+            let key = ctx.input(|input| {
+                for event in &input.events {
+                    if let egui::Event::Key {
+                        key,
+                        physical_key: _,
+                        pressed: true,
+                        repeat: _,
+                        modifiers: _,
+                    } = event
+                    {
+                        return Some(*key);
                     }
                 }
+                None
             });
 
-            draw_game(ui, &self.config, &self.gs);
+            let click = ctx.input(|input| {
+                for event in &input.events {
+                    if let egui::Event::PointerButton {
+                        pos,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        modifiers: _,
+                    } = event
+                    {
+                        return Some(*pos);
+                    }
+                }
+                None
+            });
+
+            // Perform actions from space button
+            if let Some(Key::Space) = key {
+                self.advance_gamestate();
+            } else if key == Some(Key::Escape) {
+                self.selection = Selection::default();
+            } else if let Some(key) = key {
+                // If current player is human
+                if let Player::Human = self.players[self.gs.current_player() as usize] {
+                    // get list of available moves
+                    let moves = self.gs.get_moves();
+                    // Check if factory selected
+                    if let Some(factory) = self.selection.factory {
+                        // Check if tile selected
+                        if let Some(tile) = self.selection.tile {
+                            // Select row
+                            if let Some(row) = key_to_number(&key) {
+                                let m = if row == 0 {
+                                    // Floor
+                                    moves.iter().find(|m| {
+                                        m.source == Source(factory as u8)
+                                            && m.tile == tile
+                                            && m.destination == Destination::Floor
+                                    })
+                                } else {
+                                    // Row move
+                                    let row = RowIndex::from(row as u8 - 1);
+                                    moves.iter().find(|m| {
+                                        m.source == Source(factory as u8)
+                                            && m.tile == tile
+                                            && m.destination == Destination::Row(row)
+                                    })
+                                };
+                                if let Some(m) = m {
+                                    self.gs.play_move(*m);
+                                    self.selection = Selection::default();
+                                } else {
+                                    self.selection.row = None;
+                                }
+                            }
+                        } else {
+                            // Select tile if valid move
+                            if let Some(tile) = key_to_number(&key) {
+                                if tile < 5 {
+                                    if factory == 0 {
+                                        // centre, select by colour
+                                        let centre = self.gs.centre();
+                                        let tile = Tile::from(tile);
+                                        let count = centre.get_count(tile);
+                                        if count > 0 {
+                                            self.selection.tile = Some(tile);
+                                        }
+                                    } else {
+                                        // factory, select by tile
+                                        let tiles =
+                                            self.gs.factories()[factory].unwrap().tile_vec();
+
+                                        if tile > 0 && tile < 5 {
+                                            let tile = tiles[tile - 1];
+                                            if tiles.iter().any(|t| t == &tile) {
+                                                self.selection.tile = Some(tile);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            // If a tile has been set, store list of valid moves for highlighting on board
+                            if let Some(tile) = self.selection.tile {
+                                self.selection.moves = moves
+                                    .iter()
+                                    .filter(|m| m.tile == tile && m.source == Source(factory as u8))
+                                    .cloned()
+                                    .collect();
+                            }
+                        }
+                    } else {
+                        // Select factory if valid move
+                        if let Some(factory) = key_to_number(&key) {
+                            if moves.iter().any(|m| m.source == Source(factory as u8)) {
+                                self.selection.factory = Some(factory);
+                            }
+                        }
+                    }
+                }
+            }
+
+            let mut highlight = Highlight::default();
+            if self.gs.state() == azul_tiles_rs::gamestate::State::RoundActive {
+                highlight.board = Some(self.gs.current_player() as usize);
+            }
+            highlight.factory = self.selection.factory;
+            highlight.tile = self.selection.tile;
+            highlight.rows = self.selection.moves.iter().fold([false; 5], |mut acc, m| {
+                if let Destination::Row(ind) = m.destination {
+                    acc[ind as usize] = true;
+                }
+                acc
+            });
+            highlight.floor = self
+                .selection
+                .moves
+                .iter()
+                .any(|m| m.destination == Destination::Floor);
+
+            if let Some(click) = draw_game(ui, &self.config, &self.gs, highlight, click) {
+                // if human turn, update selection
+                if let Player::Human = self.players[self.gs.current_player() as usize] {
+                    let moves = self.gs.get_moves();
+                    let m = match click {
+                        Click::Factory(factory, tile) => {
+                            self.selection.factory = Some(factory as usize);
+                            self.selection.tile = Some(tile);
+                            self.selection.moves = moves
+                                .iter()
+                                .filter(|m| m.tile == tile && m.source == Source(factory))
+                                .cloned()
+                                .collect();
+                            None
+                        }
+                        Click::Row(row) => {
+                            if let Some(factory) = self.selection.factory {
+                                if let Some(tile) = self.selection.tile {
+                                    // find move
+                                    moves.iter().find(|m| {
+                                        m.source == Source(factory as u8)
+                                            && m.tile == tile
+                                            && m.destination == Destination::Row(row)
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                        Click::Floor => {
+                            if let Some(factory) = self.selection.factory {
+                                if let Some(tile) = self.selection.tile {
+                                    // find move
+                                    moves.iter().find(|m| {
+                                        m.source == Source(factory as u8)
+                                            && m.tile == tile
+                                            && m.destination == Destination::Floor
+                                    })
+                                } else {
+                                    None
+                                }
+                            } else {
+                                None
+                            }
+                        }
+                    };
+                    if let Some(m) = m {
+                        self.gs.play_move(*m);
+                        self.selection = Selection::default();
+                    }
+                }
+            } else if let Some(click) = click {
+                self.advance_gamestate();
+            }
         });
     }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum Click {
+    Factory(u8, Tile),
+    Row(RowIndex),
+    Floor,
 }
 
 #[derive(Debug, Default)]
@@ -233,10 +455,10 @@ impl FactoryUI {
         let mut tiles: [Pos2; 4] = Default::default();
         for i in 0..4 {
             let (x, y) = match i {
-                0 => (-1.0, 1.0),
-                1 => (1.0, 1.0),
-                2 => (-1.0, -1.0),
-                3 => (1.0, -1.0),
+                0 => (-1.0, -1.0),
+                1 => (1.0, -1.0),
+                2 => (-1.0, 1.0),
+                3 => (1.0, 1.0),
                 _ => unreachable!(),
             };
             tiles[i] = centre
@@ -314,21 +536,48 @@ impl BagUI {
     }
 }
 
-fn draw_game(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>) {
+/// Indicates which parts of the UI should be highlighted for selection
+#[derive(Debug, Default, Clone)]
+struct Highlight {
+    // Which board is highlighted for active player
+    board: Option<usize>,
+    tile: Option<Tile>,
+    factory: Option<usize>,
+    rows: [bool; 5],
+    floor: bool,
+}
+
+#[derive(Debug, Default, Clone)]
+struct Selection {
+    moves: Vec<Move>,
+    factory: Option<usize>,
+    tile: Option<Tile>,
+    row: Option<RowIndex>,
+}
+
+fn draw_game(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    gs: &Gamestate<2, 6>,
+    highlight: Highlight,
+    click: Option<Pos2>,
+) -> Option<Click> {
+    let mut clicked = None;
     // Draw player boards
     for i in 0..2 {
-        draw_board(ui, config, gs, i);
+        clicked = clicked.or(draw_board(ui, config, gs, i, &highlight, click));
     }
 
     // Draw centre and factories
-    draw_centre(ui, config, gs);
+    clicked = clicked.or(draw_centre(ui, config, gs, &highlight, click));
 
     for i in 0..5 {
-        draw_factory(ui, config, gs, i);
+        clicked = clicked.or(draw_factory(ui, config, gs, i, &highlight, click));
     }
 
     // Draw bag
     draw_bag(ui, config, gs.tilebag());
+    clicked
 }
 // Draw bag of tiles
 fn draw_bag(ui: &mut egui::Ui, config: &UIConfig, bag: &TileGroup) {
@@ -341,44 +590,95 @@ fn draw_bag(ui: &mut egui::Ui, config: &UIConfig, bag: &TileGroup) {
                 config.bag.tiles[i],
                 &count.to_string(),
                 tile_to_text_colour(&tile),
+                None,
             );
         } else {
-            draw_tile_border(ui, config, tile_to_colour(&tile), config.bag.tiles[i]);
+            draw_tile_border(
+                ui,
+                config,
+                tile_to_colour(&tile),
+                config.bag.tiles[i],
+                1.0,
+                None,
+            );
         }
     }
 }
 
-fn draw_centre(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>) {
+fn draw_centre(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    gs: &Gamestate<2, 6>,
+    highlight: &Highlight,
+    click: Option<Pos2>,
+) -> Option<Click> {
     let centre = gs.centre();
+    let selected = highlight.factory == Some(0);
     ui.painter().rect_stroke(
         Rect::from_center_size(config.centre.centre, config.centre.border),
         config.tile_rounding,
-        Stroke::new(1.0, Color32::WHITE),
+        if selected {
+            Stroke::new(3.0, Color32::PURPLE)
+        } else {
+            Stroke::new(1.0, Color32::WHITE)
+        },
         egui::StrokeKind::Inside,
     );
+
+    let mut clicked = None;
+
     for (i, (&count, tile)) in centre.into_iter().enumerate() {
         if count > 0 {
             // draw tile with digit
-            draw_tile_with_text(
+            if draw_tile_with_text(
                 ui,
                 config,
                 tile_to_colour(&tile),
                 config.centre.tiles[i],
                 &count.to_string(),
                 tile_to_text_colour(&tile),
-            );
+                click,
+            ) {
+                clicked = Some(Click::Factory(0, tile));
+            }
+            if selected && highlight.tile == Some(tile) {
+                draw_tile_border(
+                    ui,
+                    config,
+                    Color32::PURPLE,
+                    config.centre.tiles[i],
+                    3.0,
+                    None,
+                );
+            }
         } else {
             // draw outline
-            draw_tile_border(ui, config, tile_to_colour(&tile), config.centre.tiles[i]);
+            draw_tile_border(
+                ui,
+                config,
+                tile_to_colour(&tile),
+                config.centre.tiles[i],
+                1.0,
+                None,
+            );
         }
     }
     if gs.first_player_tile() {
-        draw_tile(ui, config, Color32::PURPLE, config.centre.tiles[5]);
+        draw_tile(ui, config, Color32::PURPLE, config.centre.tiles[5], click);
     }
+    clicked
 }
 
 /// Draw factory to screen
-fn draw_factory(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, factory: usize) {
+fn draw_factory(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    gs: &Gamestate<2, 6>,
+    factory: usize,
+    highlight: &Highlight,
+    click: Option<Pos2>,
+) -> Option<Click> {
+    let selected = highlight.factory == Some(factory + 1);
     // Draw border
     ui.painter().rect_stroke(
         Rect::from_center_size(
@@ -386,26 +686,50 @@ fn draw_factory(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, fact
             config.factories[factory].border,
         ),
         config.tile_rounding,
-        Stroke::new(1.0, Color32::WHITE),
+        if selected {
+            Stroke::new(3.0, Color32::PURPLE)
+        } else {
+            Stroke::new(1.0, Color32::WHITE)
+        },
         egui::StrokeKind::Inside,
     );
 
     let conf = &config.factories[factory];
 
-    if let Some(factory) = gs.factories()[factory + 1] {
-        for (i, tile) in factory.tile_vec().iter().enumerate() {
-            draw_tile(ui, config, tile_to_colour(tile), conf.tiles[i]);
+    let mut clicked = None;
+
+    if let Some(factory_group) = gs.factories()[factory + 1] {
+        for (i, tile) in factory_group.tile_vec().iter().enumerate() {
+            if draw_tile(ui, config, tile_to_colour(tile), conf.tiles[i], click) {
+                clicked = Some(Click::Factory(factory as u8 + 1, *tile));
+            }
+            if selected && highlight.tile == Some(*tile) {
+                draw_tile_border(ui, config, Color32::PURPLE, conf.tiles[i], 3.0, None);
+            }
         }
     }
+    clicked
 }
 
 /// Draw player board to screen
-fn draw_board(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, board: usize) {
+fn draw_board(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    gs: &Gamestate<2, 6>,
+    board: usize,
+    highlight: &Highlight,
+    click: Option<Pos2>,
+) -> Option<Click> {
+    let selected = highlight.board == Some(board);
     // Draw border
     ui.painter().rect_stroke(
         Rect::from_center_size(config.boards[board].centre, config.boards[board].border),
         config.tile_rounding,
-        Stroke::new(1.0, Color32::WHITE),
+        if selected {
+            Stroke::new(3.0, Color32::PURPLE)
+        } else {
+            Stroke::new(1.0, Color32::WHITE)
+        },
         egui::StrokeKind::Inside,
     );
     // Draw wall
@@ -418,6 +742,7 @@ fn draw_board(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, board:
                     config,
                     tile_to_colour(&tile),
                     config.boards[board].wall[i][j],
+                    None,
                 );
             } else {
                 draw_tile_border(
@@ -425,38 +750,79 @@ fn draw_board(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, board:
                     config,
                     tile_to_colour(&WALL_COLOURS[i][j]),
                     config.boards[board].wall[i][j],
+                    1.0,
+                    None,
                 );
             }
         }
     }
 
+    let mut clicked = None;
+
     // Draw rows
     for i in 0usize..5 {
+        let colour = if selected && highlight.rows[i] {
+            Color32::PURPLE
+        } else {
+            Color32::WHITE
+        };
         for j in 0..(i + 1) {
             let tile = gs.boards()[board].rows[i].tile();
 
             if gs.boards()[board].rows[i].count() as usize > j {
                 if let Some(tile) = tile {
-                    draw_tile(
+                    if draw_tile(
                         ui,
                         config,
                         tile_to_colour(&tile),
                         config.boards[board].rows[i][j],
-                    );
+                        click,
+                    ) {
+                        clicked = Some(Click::Row(RowIndex::from(i as u8)));
+                    }
                 }
-            } else {
-                draw_tile_border(ui, config, Color32::WHITE, config.boards[board].rows[i][j]);
+            } else if draw_tile_border(
+                ui,
+                config,
+                colour,
+                config.boards[board].rows[i][j],
+                1.0,
+                click,
+            ) {
+                clicked = Some(Click::Row(RowIndex::from(i as u8)));
             }
         }
     }
 
+    let factory_colour = if selected && highlight.floor {
+        Color32::PURPLE
+    } else {
+        Color32::WHITE
+    };
+
     let scores = ["-1", "-1", "-2", "-2", "-2", "-3", "-3"];
     for (pos, score) in config.boards[board].floor.iter().zip(scores.iter()) {
-        draw_tile_border_with_text(ui, config, Color32::WHITE, *pos, score, Color32::WHITE);
+        if draw_tile_border_with_text(
+            ui,
+            config,
+            factory_colour,
+            *pos,
+            score,
+            Color32::WHITE,
+            click,
+        ) {
+            clicked = Some(Click::Floor);
+        }
     }
     // Check if player has first player token
     let offset = if gs.boards()[board].first_player_tile {
-        draw_tile(ui, config, Color32::PURPLE, config.boards[board].floor[0]);
+        draw_tile(
+            ui,
+            config,
+            Color32::PURPLE,
+            config.boards[board].floor[0],
+            click,
+        );
         1
     } else {
         0
@@ -474,6 +840,7 @@ fn draw_board(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, board:
             config,
             tile_to_colour(&tile),
             config.boards[board].floor[i + offset],
+            click,
         );
     }
 
@@ -485,19 +852,36 @@ fn draw_board(ui: &mut egui::Ui, config: &UIConfig, gs: &Gamestate<2, 6>, board:
     ui.painter().text(
         config.boards[board].score,
         egui::Align2::CENTER_CENTER,
-        gs.boards()[board].score.to_string(),
+        gs.boards()[board].score.to_string()
+            + "|"
+            + &gs.boards()[board].predicted_score.to_string(),
         font,
         Color32::WHITE,
     );
+    clicked
 }
 
 /// Draw a tile to the screen
-fn draw_tile(ui: &mut egui::Ui, config: &UIConfig, colour: Color32, pos: Pos2) {
+fn draw_tile(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    colour: Color32,
+    pos: Pos2,
+    click: Option<Pos2>,
+) -> bool {
     ui.painter().rect_filled(
         Rect::from_center_size(pos, Vec2::new(config.tile_size, config.tile_size)),
         config.tile_rounding,
         colour,
     );
+    if let Some(click) = click {
+        if Rect::from_center_size(pos, Vec2::new(config.tile_size, config.tile_size))
+            .contains(click)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 /// Draw a tile to the screen
@@ -508,9 +892,11 @@ fn draw_tile_with_text(
     pos: Pos2,
     text: &str,
     text_colour: Color32,
-) {
-    draw_tile(ui, config, colour, pos);
+    click: Option<Pos2>,
+) -> bool {
+    let b = draw_tile(ui, config, colour, pos, click);
     draw_text(ui, pos, text, text_colour);
+    b
 }
 
 fn draw_text(ui: &mut egui::Ui, pos: Pos2, text: &str, text_colour: Color32) {
@@ -524,13 +910,28 @@ fn draw_text(ui: &mut egui::Ui, pos: Pos2, text: &str, text_colour: Color32) {
 }
 
 /// Draw a tile border
-fn draw_tile_border(ui: &mut egui::Ui, config: &UIConfig, colour: Color32, pos: Pos2) {
+fn draw_tile_border(
+    ui: &mut egui::Ui,
+    config: &UIConfig,
+    colour: Color32,
+    pos: Pos2,
+    width: f32,
+    click: Option<Pos2>,
+) -> bool {
     ui.painter().rect_stroke(
         Rect::from_center_size(pos, Vec2::new(config.tile_size, config.tile_size)),
         config.tile_rounding,
-        Stroke::new(1.0, colour),
+        Stroke::new(width, colour),
         egui::StrokeKind::Inside,
     );
+    if let Some(click) = click {
+        if Rect::from_center_size(pos, Vec2::new(config.tile_size, config.tile_size))
+            .contains(click)
+        {
+            return true;
+        }
+    }
+    false
 }
 
 fn draw_tile_border_with_text(
@@ -540,9 +941,11 @@ fn draw_tile_border_with_text(
     pos: Pos2,
     text: &str,
     text_colour: Color32,
-) {
-    draw_tile_border(ui, config, colour, pos);
+    click: Option<Pos2>,
+) -> bool {
+    let b = draw_tile_border(ui, config, colour, pos, 1.0, click);
     draw_text(ui, pos, text, text_colour);
+    b
 }
 
 fn tile_to_colour(tile: &Tile) -> egui::Color32 {

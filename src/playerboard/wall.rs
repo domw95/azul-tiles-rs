@@ -64,10 +64,21 @@ impl IndexMut<(RowIndex, ColumnIndex)> for Wall {
 }
 
 impl Wall {
+    /// Read access to inner array
+    pub fn iter(&self) -> impl Iterator<Item = &[Option<Tile>; 5]> {
+        self.0.iter()
+    }
     /// Checks if a tile can be placed in this row
     /// Used for move generation
     pub fn cell_available(&self, row: RowIndex, tile: &Tile) -> bool {
         self[(row, row.tile_column(tile))].is_none()
+    }
+
+    /// Place tile on the wall and return the score
+    pub fn place_and_score_tile(&mut self, row: RowIndex, tile: Tile) -> u8 {
+        let score = self.score_tile(row, tile);
+        self.place_tile(row, tile);
+        score
     }
 
     /// Place a tile in the wall

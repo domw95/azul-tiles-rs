@@ -51,6 +51,8 @@ pub struct PlayerBoard {
     pub rows: [Row; 5],
     /// Score
     pub score: u8,
+    /// Predicted score if rows were moved to wall
+    pub predicted_score: u8,
 }
 
 impl PlayerBoard {
@@ -68,7 +70,7 @@ impl PlayerBoard {
                 // Check if row is full
                 if row_count < row.row_capacity() {
                     let total = (row_count + count).min(row.row_capacity());
-                    Some((row.capacity() - row_count, total))
+                    Some((total - row_count, total))
                 } else {
                     None
                 }
@@ -86,6 +88,8 @@ impl PlayerBoard {
     }
 
     /// Place tiles in a row or on the floor
+    /// Does not check that the move is valid
+    /// Updates predicted score
     pub fn place_tiles(
         &mut self,
         dest: Destination,
@@ -100,6 +104,8 @@ impl PlayerBoard {
             Destination::Row(row) => self.place_tiles_in_row(row, tile, count),
             Destination::Floor => self.floor.add_tiles(tile, count),
         }
+        // update predicted score
+        self.predict_score();
     }
 
     /// Place tiles in a row
@@ -123,6 +129,31 @@ impl PlayerBoard {
         };
         // If there are leftover tiles, add them to the floor
         self.floor.add_tiles(tile, leftover);
+    }
+
+    /// Fake move the full rows to the wall to calculate score
+    /// Does not actually move the tiles
+    /// Assigns the new score to predicted_score and returns it
+    pub fn predict_score(&mut self) -> u8 {
+        // Copy the wall
+        let mut wall = self.wall;
+        let mut score = 0;
+        for row_ind in RowIndex::iter() {
+            if let Some((tile, count)) = self.rows[usize::from(row_ind)].0 {
+                if count == row_ind.row_capacity() {
+                    score += wall.place_and_score_tile(row_ind, tile);
+                }
+            }
+        }
+        self.predicted_score = self.score + score + wall.score();
+        // cap the score depending on floor
+        let floor_score = floor_score(&self.floor, self.first_player_tile);
+        if self.predicted_score < floor_score {
+            self.predicted_score = 0;
+        } else {
+            self.predicted_score -= floor_score;
+        }
+        self.predicted_score
     }
 
     /// Move tiles from rows to wall

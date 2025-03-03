@@ -18,9 +18,28 @@ pub enum Tile {
     White,
 }
 
+impl From<Tile> for usize {
+    fn from(value: Tile) -> Self {
+        value as usize
+    }
+}
+
 impl From<&Tile> for u8 {
     fn from(value: &Tile) -> Self {
         *value as u8
+    }
+}
+
+impl From<usize> for Tile {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => Tile::Blue,
+            1 => Tile::Yellow,
+            2 => Tile::Red,
+            3 => Tile::Black,
+            4 => Tile::White,
+            _ => unreachable!(),
+        }
     }
 }
 /// Stores a selection of tiles for bag or centre factory
@@ -38,6 +57,11 @@ impl AddAssign for TileGroup {
 }
 
 impl TileGroup {
+    /// Access counts directly
+    pub fn counts(&self) -> &[u8; 5] {
+        &self.counts
+    }
+
     /// Create a new bag of tiles
     pub fn new_bag() -> Self {
         Self {
@@ -76,7 +100,7 @@ impl TileGroup {
         if total == 0 {
             return None;
         }
-        let n = rng.random_range(0..total);
+        let n = rng.gen_range(0..total);
         let mut sum = 0;
         for (count, tile) in self.into_iter() {
             sum += count;
@@ -104,6 +128,11 @@ impl TileGroup {
             .flat_map(|(c, t)| std::iter::repeat(t).take(*c as usize))
             .collect()
     }
+
+    /// Get the number of a certain tile in the group
+    pub fn get_count(&self, tile: Tile) -> u8 {
+        self.counts[tile as usize]
+    }
 }
 
 impl<'a> IntoIterator for &'a TileGroup {
@@ -126,7 +155,7 @@ mod test {
         let mut tg = TileGroup::new_bag();
         let mut tg_2 = TileGroup::new_empty();
         assert_eq!(tg.total(), 100);
-        let mut rng = rand::prelude::SmallRng::from_os_rng();
+        let mut rng = rand::prelude::SmallRng::from_entropy();
         for _ in 0..100 {
             let tile = tg.random_tile(&mut rng).unwrap();
             tg_2.add_tile(tile);

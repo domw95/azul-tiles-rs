@@ -23,31 +23,28 @@ pub struct Gamestate<const P: usize, const F: usize> {
     /// Current player
     current_player: u8,
     /// Round number
-    round: u8,
+    round: u16,
     /// State tracking
     state: State,
 }
 
 impl<const P: usize, const F: usize> Default for Gamestate<P, F> {
     fn default() -> Self {
-        let mut gs = Self {
-            boards: [PlayerBoard::default(); P],
-            tilebag: TileGroup::new_bag(),
-            factories: [None; F],
-            first_player_tile: true,
-            rng: rand::prelude::SmallRng::from_os_rng(),
-            current_player: 0,
-            round: 0,
-            state: State::GameEnd,
-        };
-        gs.deal();
-        gs
+        Self::new(rand::random(), 0)
     }
 }
 
 impl Gamestate<2, 6> {
     pub fn new_2_player() -> Self {
         Self::default()
+    }
+
+    pub fn new_2_player_with_seed(seed: u64, first_player: u8) -> Self {
+        Self::new(seed, first_player)
+    }
+
+    pub fn differential_predicted_score(&self) -> f32 {
+        self.boards[0].predicted_score as f32 - self.boards[1].predicted_score as f32
     }
 }
 
@@ -64,9 +61,39 @@ impl Gamestate<4, 10> {
 }
 
 impl<const P: usize, const F: usize> Gamestate<P, F> {
+    /// Initialiser
+    pub fn new(seed: u64, first_player: u8) -> Self {
+        let mut gs = Self {
+            boards: [PlayerBoard::default(); P],
+            tilebag: TileGroup::new_bag(),
+            factories: [None; F],
+            first_player_tile: true,
+            rng: rand::prelude::SmallRng::seed_from_u64(seed),
+            current_player: first_player,
+            round: 0,
+            state: State::GameEnd,
+        };
+        gs.deal();
+        gs
+    }
+
     /// Get current game state
     pub fn state(&self) -> State {
         self.state
+    }
+
+    /// Get current round
+    pub fn round(&self) -> u16 {
+        self.round
+    }
+
+    /// Get game scores
+    pub fn scores(&self) -> [u8; P] {
+        let mut scores = [0; P];
+        for (i, b) in self.boards.iter().enumerate() {
+            scores[i] = b.score;
+        }
+        scores
     }
 
     /// Get tile bag
@@ -164,7 +191,6 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
         }
 
         // Move remaining tiles to centre
-
         if let Some(centre) = &mut self.factories[0] {
             centre.add_assign(factory);
         } else {
@@ -183,6 +209,34 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
             self.current_player = (self.current_player + 1) % P as u8;
         }
         self.state
+    }
+
+    /// Get the predicted score if this move were to be played
+    /// Helps players evaluate each move
+    /// Returns the score and the change in predicted score
+    pub fn predict_score(&self, move_: Move) -> (u8, i8) {
+        // Clone the board
+        let mut board = self.boards[self.current_player as usize].clone();
+        // record previous predicted score
+        let prev_score = board.predicted_score;
+
+        // Place on board
+        board.place_tiles(
+            move_.destination,
+            move_.tile,
+            move_.count,
+            move_.source.is_centre() && self.first_player_tile,
+        );
+
+        (
+            board.predicted_score,
+            board.predicted_score as i8 - prev_score as i8,
+        )
+    }
+
+    /// Check if this move will take the first player tile
+    pub fn takes_fp(&self, move_: &Move) -> bool {
+        move_.source.is_centre() && self.first_player_tile
     }
 
     /// End the round, add up scores and check for game end conditions
@@ -207,6 +261,7 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
             .collect::<Vec<_>>()
             .into_iter()
             .any(|g| g)
+            || self.round == 10
         {
             // game over, calculate final scores
             for b in &mut self.boards {
@@ -258,49 +313,6 @@ pub struct Move {
     pub destination: Destination,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub struct MoveDetailed {
-    move_: Move,
-    count: u8,
-    fp: bool,
-    row: RowState,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-enum RowState {
-    Partial,
-    Full,
-    Overfull,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub enum State {
-    RoundActive,
-    RoundEnd,
-    GameEnd,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-struct Source(u8);
-
-impl Source {
-    fn is_centre(&self) -> bool {
-        self.0 == 0
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Copy)]
-pub enum Destination {
-    Row(RowIndex),
-    Floor,
-}
-
-impl From<RowIndex> for Destination {
-    fn from(value: RowIndex) -> Self {
-        Self::Row(value)
-    }
-}
-
 impl Move {
     pub fn new(
         source: Source,
@@ -333,9 +345,92 @@ impl Move {
 
     pub fn fills_row(&self) -> bool {
         match self.destination {
-            Destination::Row(row) => row.capacity() == self.count,
+            Destination::Row(row) => self.row_count == row.capacity(),
             Destination::Floor => false,
         }
+    }
+
+    pub fn no_floor_tiles(&self) -> bool {
+        match self.destination {
+            Destination::Row(row) => self.count == self.play_count,
+            Destination::Floor => false,
+        }
+    }
+
+    pub fn perfect_move(&self) -> bool {
+        self.fills_row() && self.no_floor_tiles()
+    }
+
+    pub fn floor_tiles(&self) -> u8 {
+        match self.destination {
+            Destination::Row(_) => self.count - self.play_count,
+            Destination::Floor => self.count,
+        }
+    }
+
+    pub fn row_capacity(&self) -> u8 {
+        match self.destination {
+            Destination::Row(row) => row.capacity(),
+            Destination::Floor => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub struct MoveDetailed {
+    move_: Move,
+    count: u8,
+    fp: bool,
+    row: RowState,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+enum RowState {
+    Partial,
+    Full,
+    Overfull,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum State {
+    RoundActive,
+    RoundEnd,
+    GameEnd,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub struct Source(pub u8);
+
+impl From<Source> for usize {
+    fn from(value: Source) -> Self {
+        value.0 as usize
+    }
+}
+
+impl Source {
+    fn is_centre(&self) -> bool {
+        self.0 == 0
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Copy)]
+pub enum Destination {
+    Row(RowIndex),
+    Floor,
+}
+
+impl From<Destination> for usize {
+    fn from(value: Destination) -> Self {
+        match value {
+            Destination::Row(r) => r as usize,
+            Destination::Floor => 5,
+        }
+    }
+}
+
+impl From<RowIndex> for Destination {
+    fn from(value: RowIndex) -> Self {
+        Self::Row(value)
     }
 }
 
