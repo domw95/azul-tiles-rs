@@ -735,7 +735,7 @@ fn draw_board(
     // Draw wall
     for i in 0usize..5 {
         for j in 0usize..5 {
-            let tile = gs.boards()[board].wall[(i.into(), j.into())];
+            let tile = gs.boards()[board].wall.get_tile(i.into(), j.into());
             if let Some(tile) = tile {
                 draw_tile(
                     ui,

@@ -46,32 +46,56 @@ pub const WALL_COLOURS: [[Tile; 5]; 5] = [
     ],
 ];
 
+const ROW_MASKS: [u32; 5] = [
+    0b11111,
+    0b1111100000,
+    0b1111100000000,
+    0b1111100000000000,
+    0b11111000000000000000,
+];
+
+const COLUMN_MASKS: [u32; 5] = [
+    0b1000010000100001000010000,
+    0b0100001000010000100001000,
+    0b0010000100001000010000100,
+    0b0001000010000100001000010,
+    0b0000100001000010000100001,
+];
+
+const COLOUR_MASKS: [u32; 5] = [
+    0b1000001000001000001000001,
+    0b0100000100000100000100000,
+    0b0010000010000010000010000,
+    0b0001000001000001000001000,
+    0b0000100000100000100000100,
+];
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Wall([[Option<Tile>; 5]; 5]);
-
-impl Index<(RowIndex, ColumnIndex)> for Wall {
-    type Output = Option<Tile>;
-
-    fn index(&self, index: (RowIndex, ColumnIndex)) -> &Self::Output {
-        &self.0[usize::from(&index.0)][usize::from(&index.1)]
-    }
-}
-
-impl IndexMut<(RowIndex, ColumnIndex)> for Wall {
-    fn index_mut(&mut self, index: (RowIndex, ColumnIndex)) -> &mut Self::Output {
-        &mut self.0[usize::from(&index.0)][usize::from(&index.1)]
-    }
-}
+pub struct Wall(u32);
 
 impl Wall {
-    /// Read access to inner array
-    pub fn iter(&self) -> impl Iterator<Item = &[Option<Tile>; 5]> {
-        self.0.iter()
+    #[inline]
+    fn cell_position(row: RowIndex, col: ColumnIndex) -> u32 {
+        (row as u32) * 5 + col as u32
     }
+
+    #[inline]
+    fn cell_position_usize(row: usize, col: usize) -> u32 {
+        (row as u32) * 5 + col as u32
+    }
+
+    pub fn get_tile(&self, row: RowIndex, col: ColumnIndex) -> Option<Tile> {
+        if self.0 & (1 << Self::cell_position(row, col)) == 0 {
+            None
+        } else {
+            Some(WALL_COLOURS[row as usize][col as usize])
+        }
+    }
+
     /// Checks if a tile can be placed in this row
     /// Used for move generation
     pub fn cell_available(&self, row: RowIndex, tile: &Tile) -> bool {
-        self[(row, row.tile_column(tile))].is_none()
+        self.0 & (1 << Self::cell_position(row, row.tile_column(tile))) == 0
     }
 
     /// Place tile on the wall and return the score
@@ -85,7 +109,7 @@ impl Wall {
     /// Does not check if the move is valid
     /// Should have been previously checked with cell_available
     pub fn place_tile(&mut self, row: RowIndex, tile: Tile) {
-        self[(row, row.tile_column(&tile))] = Some(tile);
+        self.0 |= 1 << Self::cell_position(row, row.tile_column(&tile));
     }
 
     /// Calculate score of placing tile
@@ -96,14 +120,14 @@ impl Wall {
         let mut col_score = 0;
         // Check up
         for i in (0..row).rev() {
-            if self.0[i][col].is_none() {
+            if self.0 & (1 << Self::cell_position_usize(i, col)) == 0 {
                 break;
             }
             col_score += 1;
         }
         // Check down
         for i in row + 1..5 {
-            if self.0[i][col].is_none() {
+            if self.0 & (1 << Self::cell_position_usize(i, col)) == 0 {
                 break;
             }
             col_score += 1;
@@ -114,14 +138,14 @@ impl Wall {
         let mut row_score = 0;
         // Check left
         for i in (0..col).rev() {
-            if self.0[row][i].is_none() {
+            if self.0 & (1 << Self::cell_position_usize(row, i)) == 0 {
                 break;
             }
             row_score += 1;
         }
         // Check right
         for i in col + 1..5 {
-            if self.0[row][i].is_none() {
+            if self.0 & (1 << Self::cell_position_usize(row, i)) == 0 {
                 break;
             }
             row_score += 1;
@@ -141,35 +165,32 @@ impl Wall {
     pub fn score(&self) -> u8 {
         let mut score = 0;
         // Row
-        score += 2 * self
-            .0
+        score += 2 * ROW_MASKS
             .iter()
-            .filter(|row| row.iter().all(|t| t.is_some()))
+            .filter(|&mask| self.0 & mask == *mask)
             .count() as u8;
+
         // Column
-        score += 7 * ColumnIndex::iter()
-            .filter(|col| RowIndex::iter().all(|row| self[(row, *col)].is_some()))
+        score += 7 * COLUMN_MASKS
+            .iter()
+            .filter(|&mask| self.0 & mask == *mask)
             .count() as u8;
         // Colours
         score += 10
-            * Tile::iter()
-                .filter(|tile| {
-                    RowIndex::iter().all(|row| {
-                        let col = row.tile_column(tile);
-                        self[(row, col)].is_some()
-                    })
-                })
+            * COLOUR_MASKS
+                .iter()
+                .filter(|&mask| self.0 & mask == *mask)
                 .count() as u8;
         score
     }
 
     /// Check for full row as game ending condition
     pub fn has_full_row(&self) -> bool {
-        self.0.iter().any(|row| row.iter().all(|t| t.is_some()))
+        ROW_MASKS.iter().any(|mask| self.0 & mask == *mask)
     }
 
     pub(crate) fn tile_count(&self) -> u8 {
-        self.0.iter().flatten().filter(|t| t.is_some()).count() as u8
+        self.0.count_ones() as u8
     }
 }
 

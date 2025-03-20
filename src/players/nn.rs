@@ -239,11 +239,11 @@ fn pb_to_array(pb: &PlayerBoard) -> SMatrix<f32, 59, 1> {
 
 fn wall_to_array(wall: &Wall) -> SMatrix<f32, 25, 1> {
     let mut arr = SMatrix::zeros();
-    for (i, row) in wall.iter().enumerate() {
-        for (j, tile) in row.iter().enumerate() {
-            arr[(i * 5 + j, 0)] = if tile.is_some() { 1.0 } else { 0.0 };
-        }
-    }
+    // for (i, row) in wall.iter().enumerate() {
+    //     for (j, tile) in row.iter().enumerate() {
+    //         arr[(i * 5 + j, 0)] = if tile.is_some() { 1.0 } else { 0.0 };
+    //     }
+    // }
     arr
 }
 
