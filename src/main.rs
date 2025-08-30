@@ -1,17 +1,14 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
-use std::fs::File;
-
 use azul_tiles_rs::{
     gamestate::{Destination, Gamestate, Move, Source},
-    playerboard::{wall::WALL_COLOURS, PlayerBoard, RowIndex},
-    players::{self, minimax::Minimaxer, nn::MoveSelectNN, SLNNPlayer},
-    runner::MatchUpResult,
+    playerboard::{wall::WALL_COLOURS, RowIndex},
+    players::{self, minimax::Minimaxer},
     tiles::{Tile, TileGroup},
 };
-use eframe::{egui, egui_glow::painter};
-use egui::{Color32, FontId, Key, Painter, PointerButton, Pos2, Rect, Sense, Stroke, Vec2};
+use eframe::egui;
+use egui::{Color32, FontId, Key, PointerButton, Pos2, Rect, Stroke, Vec2};
 
 fn main() -> eframe::Result {
     // env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
@@ -90,14 +87,22 @@ impl Default for MyApp {
     fn default() -> Self {
         // let (player, _, _): (MoveSelectNN, f64, MatchUpResult) =
         //     serde_json::from_reader(File::open("move_select_nn.json").unwrap()).unwrap();
-        let player = Minimaxer {};
+        let player = Minimaxer::new(
+            minimaxer::negamax::SearchOptions {
+                alpha_beta: true,
+                max_time: Some(std::time::Duration::from_millis(100)),
+                iterative: true,
+                ..Default::default()
+            },
+            "Minimaxer",
+        );
         Self {
             gs: Gamestate::new_2_player_with_seed(rand::random(), 0),
             config: UIConfig::default(),
             players: [
-                Player::Human,
+                // Player::Human,
                 // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer)),
-                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
+                Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
                 Player::Ai(Box::new(player)),
             ],
             selection: Selection::default(),

@@ -1,4 +1,5 @@
 use crate::gamestate;
+use log::debug;
 use minimaxer::{self, node::Node};
 
 use super::Player;
@@ -32,7 +33,19 @@ impl minimaxer::Evaluate<gamestate::Gamestate<2, 6>> for ScoreEvaluator {
 }
 
 #[derive(Debug, Clone)]
-pub struct Minimaxer {}
+pub struct Minimaxer {
+    pub opts: minimaxer::negamax::SearchOptions,
+    pub name: String,
+}
+
+impl Minimaxer {
+    pub fn new(opts: minimaxer::negamax::SearchOptions, name: impl Into<String>) -> Self {
+        Self {
+            opts,
+            name: name.into(),
+        }
+    }
+}
 
 impl Player<2, 6> for Minimaxer {
     fn pick_move(
@@ -41,11 +54,14 @@ impl Player<2, 6> for Minimaxer {
         moves: Vec<gamestate::Move>,
     ) -> gamestate::Move {
         let evaluator = ScoreEvaluator;
-        let mut n = minimaxer::negamax::Negamax::new(Node::new(gamestate.clone()), evaluator);
-        n.alpha_beta = true;
-        n.max_depth = Some(5);
+        let mut n =
+            minimaxer::negamax::Negamax::new(Node::new(gamestate.clone()), evaluator, self.opts);
         let result = n.search();
-        dbg!(&result);
+        debug!("Minimax search result: {:?}", result);
         result.best
+    }
+
+    fn name(&self) -> String {
+        self.name.clone()
     }
 }

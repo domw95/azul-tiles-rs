@@ -14,6 +14,8 @@ pub mod nn;
 /// and a list of possible moves
 pub trait Player<const P: usize, const F: usize>: DynClone {
     fn pick_move(&mut self, gamestate: &Gamestate<P, F>, moves: Vec<Move>) -> Move;
+
+    fn name(&self) -> String;
 }
 
 #[derive(Debug, Clone)]
@@ -35,6 +37,10 @@ impl<const P: usize, const F: usize> Player<P, F> for RandomPlayer {
     fn pick_move(&mut self, _gamestate: &Gamestate<P, F>, moves: Vec<Move>) -> Move {
         moves[self.0.gen_range(0..moves.len())]
     }
+
+    fn name(&self) -> String {
+        "RandomPlayer".into()
+    }
 }
 
 /// Picks first move
@@ -44,6 +50,9 @@ pub struct FirstMovePlayer;
 impl<const P: usize, const F: usize> Player<P, F> for FirstMovePlayer {
     fn pick_move(&mut self, _gamestate: &Gamestate<P, F>, moves: Vec<Move>) -> Move {
         moves[0]
+    }
+    fn name(&self) -> String {
+        "FirstMovePlayer".into()
     }
 }
 
@@ -76,6 +85,10 @@ impl MoveRankPlayer {
 impl<const P: usize, const F: usize> Player<P, F> for MoveRankPlayer {
     fn pick_move(&mut self, _gamestate: &Gamestate<P, F>, moves: Vec<Move>) -> Move {
         *moves.iter().reduce(|a, b| self.compare_move(a, b)).unwrap()
+    }
+
+    fn name(&self) -> String {
+        "MoveRankPlayer".into()
     }
 }
 
@@ -122,6 +135,10 @@ impl<const P: usize, const F: usize> Player<P, F> for MoveRankPlayer2 {
             .reduce(|a, b| self.compare_move(a, b))
             .unwrap()
             .2
+    }
+
+    fn name(&self) -> String {
+        "MoveRankPlayer2".into()
     }
 }
 
@@ -185,6 +202,10 @@ impl Player<2, 6> for MoveWeightPlayer {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap()
             .0
+    }
+
+    fn name(&self) -> String {
+        "MoveWeightPlayer".into()
     }
 }
 
@@ -271,6 +292,10 @@ impl Player<2, 6> for SLNNPlayer {
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap())
             .unwrap()
             .0
+    }
+
+    fn name(&self) -> String {
+        "SLNNPlayer".into()
     }
 }
 

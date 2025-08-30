@@ -74,6 +74,10 @@ impl Player<2, 6> for MoveSelectNN {
 
         unreachable!()
     }
+
+    fn name(&self) -> String {
+        "MoveSelectNN".into()
+    }
 }
 
 fn index_to_move(index: usize) -> (usize, usize, usize) {

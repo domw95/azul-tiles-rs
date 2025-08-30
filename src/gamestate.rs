@@ -1,10 +1,10 @@
-use std::{num::NonZero, ops::AddAssign};
+use std::ops::AddAssign;
 
 use rand::SeedableRng;
 use strum::IntoEnumIterator;
 
 use crate::{
-    playerboard::{PlayerBoard, Row, RowIndex},
+    playerboard::{PlayerBoard, RowIndex},
     tiles::{Tile, TileGroup},
 };
 

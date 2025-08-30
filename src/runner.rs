@@ -5,6 +5,7 @@ use std::{
     ops::{Add, AddAssign},
 };
 
+use log::{debug, info};
 use rand::{rngs::SmallRng, Rng, RngCore, SeedableRng};
 use rand_distr::Bernoulli;
 
@@ -95,6 +96,16 @@ pub struct WinnerCount {
     pub draw: u32,
 }
 
+impl WinnerCount {
+    pub fn invert(&self) -> Self {
+        Self {
+            player0: self.player1,
+            player1: self.player0,
+            draw: self.draw,
+        }
+    }
+}
+
 impl AddAssign<Winner> for WinnerCount {
     fn add_assign(&mut self, rhs: Winner) {
         match rhs {
@@ -138,6 +149,24 @@ pub struct MatchUpResult {
     pub winner_count: WinnerCount,
 }
 
+impl MatchUpResult {
+    pub fn average_score(&self) -> f64 {
+        if self.games == 0 {
+            0.0
+        } else {
+            self.score / self.games as f64
+        }
+    }
+
+    pub fn invert(&self) -> Self {
+        Self {
+            games: self.games,
+            score: -self.score,
+            winner_count: self.winner_count.invert(),
+        }
+    }
+}
+
 impl AddAssign<GamePairResult> for MatchUpResult {
     fn add_assign(&mut self, rhs: GamePairResult) {
         self.games += 2;
@@ -154,6 +183,57 @@ impl Sum<GamePairResult> for MatchUpResult {
             result += r;
         }
         result
+    }
+}
+
+/// Rank a list of players by running them all against each other
+pub struct PlayerRanker {
+    players: Vec<Box<dyn Player<2, 6>>>,
+    results: Vec<Vec<MatchUpResult>>,
+}
+
+impl PlayerRanker {
+    pub fn new(players: Vec<Box<dyn Player<2, 6>>>) -> Self {
+        let mut results = vec![vec![]; players.len()];
+        for v in &mut results {
+            v.resize(players.len(), MatchUpResult::default());
+        }
+        Self { players, results }
+    }
+
+    /// Rank a vec of players by playing them against each other
+    pub fn rank_players(&mut self, games: u32) {
+        // create a vec of vec of empty match results
+
+        let seed = rand::random();
+        // Run each matchup
+        for i in 0..self.players.len() {
+            for j in (i + 1)..self.players.len() {
+                let player1 = dyn_clone::clone_box(&*self.players[i]);
+                let player2 = dyn_clone::clone_box(&*self.players[j]);
+                let mut runner = Runner::new_2_player([player1, player2], Some(seed));
+                let result = runner.run_matchup(games);
+                self.results[i][j] = result.invert();
+                self.results[j][i] = result;
+                info!(
+                    "Matchup {} vs {}: {:?}",
+                    self.players[i].name(),
+                    self.players[j].name(),
+                    result
+                );
+            }
+        }
+        // Print the upper triangular matrix of results as csv
+        for p in self.players.iter() {
+            print!("{},", p.name());
+        }
+        println!();
+        for result in self.results.iter() {
+            for r in result {
+                print!("{:?},", r.average_score());
+            }
+            println!();
+        }
     }
 }
 
