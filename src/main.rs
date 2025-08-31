@@ -114,7 +114,7 @@ impl Default for MyApp {
         let ppo = PPOMoveSelector::<Backend>::from_file(
             PolicyConfig::new(150, 240),
             ValueConfig::new(150, 240),
-            &PathBuf::from("ppo/checkpoint_80"),
+            &PathBuf::from("ppo/checkpoint_200"),
             &device,
         );
         Self {
