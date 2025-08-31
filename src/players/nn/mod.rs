@@ -80,7 +80,7 @@ impl Player<2, 6> for MoveSelectNN {
     }
 }
 
-fn index_to_move(index: usize) -> (usize, usize, usize) {
+pub fn index_to_move(index: usize) -> (usize, usize, usize) {
     let source = index / 30;
     let tile = (index % 30) / 6;
     let dest = index % 6;
@@ -177,7 +177,7 @@ impl EvolvingPlayer for MoveSelectNN {
     }
 }
 
-fn gs_to_array(gs: &Gamestate<2, 6>) -> SMatrix<f32, 150, 1> {
+pub fn gs_to_array(gs: &Gamestate<2, 6>) -> SMatrix<f32, 150, 1> {
     let mut arr = SMatrix::zeros();
     let a = pb_to_array(&gs.boards()[0]);
     let b = pb_to_array(&gs.boards()[1]);

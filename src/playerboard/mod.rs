@@ -156,6 +156,20 @@ impl PlayerBoard {
         self.predicted_score
     }
 
+    /// Return a copy of the wall with all tiles moved to where they will be at the end
+    /// of the round
+    pub fn simulate_wall(&self) -> Wall {
+        let mut wall = self.wall.clone();
+        for row_ind in RowIndex::iter() {
+            if let Some((tile, count)) = self.rows[usize::from(row_ind)].0 {
+                if count == row_ind.row_capacity() {
+                    wall.place_tile(row_ind, tile);
+                }
+            }
+        }
+        wall
+    }
+
     /// Move tiles from rows to wall
     /// Score as it goes
     /// Return tiles that are to be returned

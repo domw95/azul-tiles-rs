@@ -1,17 +1,29 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 #![allow(rustdoc::missing_crate_level_docs)] // it's an example
 
+use std::{fs::File, path::PathBuf};
+
 use azul_tiles_rs::{
     gamestate::{Destination, Gamestate, Move, Source},
     playerboard::{wall::WALL_COLOURS, RowIndex},
-    players::{self, minimax::Minimaxer},
+    players::{
+        self,
+        minimax::Minimaxer,
+        nn::MoveSelectNN,
+        ppo::{PPOMoveSelector, PolicyConfig, ValueConfig},
+    },
+    runner::MatchUpResult,
     tiles::{Tile, TileGroup},
+};
+use burn::{
+    backend::{NdArray, Wgpu},
+    tensor::Device,
 };
 use eframe::egui;
 use egui::{Color32, FontId, Key, PointerButton, Pos2, Rect, Stroke, Vec2};
 
 fn main() -> eframe::Result {
-    // env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
+    env_logger::init(); // Log to stderr (if you run with `RUST_LOG=debug`).
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([900.0, 1000.0]),
 
@@ -83,6 +95,7 @@ fn key_to_number(key: &Key) -> Option<usize> {
     }
 }
 
+type Backend = NdArray;
 impl Default for MyApp {
     fn default() -> Self {
         // let (player, _, _): (MoveSelectNN, f64, MatchUpResult) =
@@ -90,20 +103,29 @@ impl Default for MyApp {
         let player = Minimaxer::new(
             minimaxer::negamax::SearchOptions {
                 alpha_beta: true,
-                max_time: Some(std::time::Duration::from_millis(100)),
+                max_time: Some(std::time::Duration::from_millis(10)),
                 iterative: true,
                 ..Default::default()
             },
             "Minimaxer",
+            players::minimax::ScoreEvaluator,
+        );
+        let device = Device::<Backend>::default();
+        let ppo = PPOMoveSelector::<Backend>::from_file(
+            PolicyConfig::new(150, 240),
+            ValueConfig::new(150, 240),
+            &PathBuf::from("ppo/checkpoint_80"),
+            &device,
         );
         Self {
             gs: Gamestate::new_2_player_with_seed(rand::random(), 0),
             config: UIConfig::default(),
             players: [
-                // Player::Human,
+                Player::Human,
                 // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer)),
-                Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
-                Player::Ai(Box::new(player)),
+                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
+                // Player::Ai(Box::new(player)),
+                Player::Ai(Box::new(ppo)),
             ],
             selection: Selection::default(),
         }

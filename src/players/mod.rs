@@ -7,6 +7,7 @@ use crate::gamestate::{Destination, Gamestate, Move};
 
 pub mod minimax;
 pub mod nn;
+pub mod ppo;
 
 /// Required implementation for a player
 /// Main function is [Player::pick_move]

@@ -374,6 +374,11 @@ impl Move {
             Destination::Floor => 0,
         }
     }
+
+    /// Convert the move to an index between 0 and 179
+    pub fn to_index(&self) -> usize {
+        (usize::from(self.source) * 30) + (self.tile as usize * 6) + usize::from(self.destination)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Copy)]
