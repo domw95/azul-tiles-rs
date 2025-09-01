@@ -124,8 +124,8 @@ impl Default for MyApp {
                 Player::Human,
                 // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer)),
                 // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
-                // Player::Ai(Box::new(player)),
-                Player::Ai(Box::new(ppo)),
+                Player::Ai(Box::new(player)),
+                // Player::Ai(Box::new(ppo)),
             ],
             selection: Selection::default(),
         }
