@@ -7,18 +7,22 @@ use minimaxer::negamax::SearchOptions;
 
 use burn::backend::{Autodiff, NdArray, Wgpu};
 
-type Backend = Autodiff<NdArray>; //Wgpu; //NdArray;
+type Backend = Autodiff<Wgpu>; //Wgpu; //NdArray;
 
 fn main() {
     let device = Device::<Backend>::default();
+    burn::backend::wgpu::init_setup::<burn::backend::wgpu::graphics::OpenGl>(
+        &device,
+        Default::default(),
+    );
     // Create policy and value networks
     let policy_config = PolicyConfig {
         input_size: 150,
-        hidden_size: 240,
+        hidden_size: 320,
     };
     let value_config = ValueConfig {
         input_size: 150,
-        hidden_size: 240,
+        hidden_size: 320,
     };
     let mut ppo = PPOMoveSelector::<Backend>::new(policy_config, value_config, &device);
 

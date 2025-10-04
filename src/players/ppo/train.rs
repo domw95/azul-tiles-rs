@@ -55,7 +55,7 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
         let learning_rate = 0.001;
 
         // Create dir to store progress
-        let dir = std::path::Path::new("ppo");
+        let dir = std::path::Path::new("ppo_large");
         std::fs::create_dir_all(dir).unwrap();
         let mut recorder: record::NamedMpkFileRecorder<FullPrecisionSettings> =
             DefaultFileRecorder::default();
