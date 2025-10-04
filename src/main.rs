@@ -103,7 +103,7 @@ impl Default for MyApp {
         let player = Minimaxer::new(
             minimaxer::negamax::SearchOptions {
                 alpha_beta: true,
-                max_time: Some(std::time::Duration::from_millis(10)),
+                max_time: Some(std::time::Duration::from_millis(1000)),
                 iterative: true,
                 ..Default::default()
             },
