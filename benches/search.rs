@@ -19,6 +19,8 @@ use minimaxer::negamax::{NegamaxAim, SearchOptions};
 use minimaxer::node::Node;
 use std::time::{Duration, Instant};
 
+
+
 /// Deterministic LCG so position selection never depends on rand's version.
 struct Lcg(u64);
 impl Lcg {
@@ -260,6 +262,14 @@ fn main() {
         diversity(depth, false, false, 1.5, reps);
         return;
     }
+    if mode == "engine" {
+        engine_micro();
+        return;
+    }
+    if mode == "trans" {
+        transposition_rate(depth, args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3));
+        return;
+    }
     if mode == "size" {
         println!("gamestate_bytes={}", std::mem::size_of::<Gamestate<2, 6>>());
         println!("node_bytes={}", std::mem::size_of::<Node<Gamestate<2, 6>, Move>>());
@@ -291,4 +301,120 @@ fn main() {
         }
     }
     println!("mode={mode} depth={depth} nodes={nodes} checksum={sum:016x} min_ms={:.3}", best.as_secs_f64() * 1000.0);
+}
+
+/// How often does the Azul search reach the same position twice?
+/// This decides whether a transposition table is worth anything here.
+/// Keyed on the derived Debug output: slow, but unambiguous for a one-off.
+fn transposition_rate(depth: u8, n_pos: usize) {
+    fn walk(
+        g: &Gamestate<2, 6>,
+        depth: u8,
+        seen: &mut std::collections::HashSet<String>,
+        total: &mut u64,
+    ) {
+        *total += 1;
+        seen.insert(format!("{:?}", g));
+        if depth == 0 || g.is_round_over() {
+            return;
+        }
+        for m in g.get_moves() {
+            let mut c = g.clone();
+            c.play_move(m);
+            walk(&c, depth - 1, seen, total);
+        }
+    }
+
+    println!("{:>5} {:>12} {:>12} {:>10}", "depth", "nodes", "distinct", "repeats");
+    for g in positions().into_iter().take(n_pos) {
+        let mut seen = std::collections::HashSet::new();
+        let mut total = 0u64;
+        walk(&g, depth, &mut seen, &mut total);
+        let distinct = seen.len() as u64;
+        println!(
+            "{:>5} {:>12} {:>12} {:>9.1}%",
+            depth,
+            total,
+            distinct,
+            100.0 * (total - distinct) as f64 / total as f64
+        );
+    }
+}
+
+/// Times the game engine primitives in isolation. These sit under both the
+/// minimax search and PPO rollouts, so a win here helps both.
+fn engine_micro() {
+    let states: Vec<Gamestate<2, 6>> = positions();
+    let reps = 20_000;
+
+    // clone
+    let t = Instant::now();
+    let mut acc = 0usize;
+    for _ in 0..reps {
+        for g in &states {
+            let c = std::hint::black_box(g.clone());
+            acc += c.current_player() as usize;
+        }
+    }
+    let n = (reps * states.len()) as f64;
+    println!("clone                {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
+
+    // get_moves (allocates a Vec every call)
+    let t = Instant::now();
+    let mut total_moves = 0usize;
+    let mut max_moves = 0usize;
+    for _ in 0..reps {
+        for g in &states {
+            let m = std::hint::black_box(g.get_moves());
+            total_moves += m.len();
+            max_moves = max_moves.max(m.len());
+        }
+    }
+    println!("get_moves            {:>8.1} ns   (avg {:.1} moves, max {})",
+        t.elapsed().as_nanos() as f64 / n, total_moves as f64 / n, max_moves);
+
+    // play_move on a fresh clone, which is what the search actually does
+    let movesets: Vec<(Gamestate<2, 6>, Move)> =
+        states.iter().filter_map(|g| g.get_moves().first().map(|m| (g.clone(), *m))).collect();
+    let t = Instant::now();
+    for _ in 0..reps {
+        for (g, m) in &movesets {
+            let mut c = g.clone();
+            c.play_move(*m);
+            std::hint::black_box(c.current_player());
+        }
+    }
+    let n2 = (reps * movesets.len()) as f64;
+    println!("clone + play_move    {:>8.1} ns", t.elapsed().as_nanos() as f64 / n2);
+
+    // the terminal check and the evaluator
+    let t = Instant::now();
+    for _ in 0..reps {
+        for g in &states {
+            std::hint::black_box(g.is_round_over());
+        }
+    }
+    println!("is_round_over        {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
+
+    let t = Instant::now();
+    for _ in 0..reps {
+        for g in &states {
+            std::hint::black_box(g.differential_predicted_score());
+        }
+    }
+    println!("evaluate (score)     {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
+
+    // The richer evaluator, to see what better evaluation actually costs
+    // relative to move generation.
+    use azul_tiles_rs::players::minimax::HeuristicEvaluator;
+    use minimaxer::Evaluate;
+    let mut heur = HeuristicEvaluator::default();
+    let t = Instant::now();
+    for _ in 0..reps {
+        for g in &states {
+            std::hint::black_box(heur.evaluate(g));
+        }
+    }
+    println!("evaluate (heuristic) {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
+    println!("\n(acc {acc})");
 }
