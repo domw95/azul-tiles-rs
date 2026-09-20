@@ -1,3 +1,4 @@
+#![recursion_limit = "256"]
 use azul_tiles_rs::players::minimax::{Minimaxer, ScoreEvaluator};
 use azul_tiles_rs::players::ppo::train::PPOTrainer;
 use azul_tiles_rs::players::ppo::{PPOMoveSelector, PolicyConfig, ValueConfig};

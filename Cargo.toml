@@ -11,6 +11,10 @@ criterion = "0.5"
 name = "wall"
 harness = false
 
+[[bench]]
+name = "search"
+harness = false
+
 
 [dependencies]
 strum = { version = "0.26.3", features = ["derive"] }
