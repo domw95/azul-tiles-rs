@@ -141,6 +141,15 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
         self.round += 1;
     }
 
+    /// True when no moves remain, i.e. every factory is empty.
+    /// Equivalent to `get_moves().is_empty()` but allocation free: a floor
+    /// move is always generated for any tile still sitting in a factory.
+    pub fn is_round_over(&self) -> bool {
+        self.factories
+            .iter()
+            .all(|f| f.map_or(true, |f| f.total() == 0))
+    }
+
     /// get a list of possible moves to play
     pub fn get_moves(&self) -> Vec<Move> {
         let mut moves = Vec::with_capacity(64);

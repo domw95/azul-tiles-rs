@@ -13,6 +13,10 @@ impl minimaxer::Gamestate<gamestate::Move> for gamestate::Gamestate<2, 6> {
         gamestate::Gamestate::play_move(self, *m);
     }
 
+    fn is_terminal(&mut self) -> bool {
+        gamestate::Gamestate::is_round_over(self)
+    }
+
     fn player_aim(&self) -> minimaxer::NodeAim {
         match self.current_player() {
             0 => minimaxer::NodeAim::Maximise,
