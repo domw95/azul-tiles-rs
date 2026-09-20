@@ -10,7 +10,7 @@ use azul_tiles_rs::{
         self,
         minimax::Minimaxer,
         nn::MoveSelectNN,
-        ppo::{PPOMoveSelector, PolicyConfig, ValueConfig},
+        ppo::PPOMoveSelector,
     },
     runner::MatchUpResult,
     tiles::{Tile, TileGroup},
@@ -111,21 +111,28 @@ impl Default for MyApp {
             players::minimax::ScoreEvaluator,
         );
         let device = Device::<Backend>::default();
-        let ppo = PPOMoveSelector::<Backend>::from_file(
-            PolicyConfig::new(150, 240),
-            ValueConfig::new(150, 240),
-            &PathBuf::from("ppo/checkpoint_200"),
-            &device,
-        );
+        // Play a trained checkpoint when one is there, otherwise minimax.
+        // AZUL_PPO picks the directory, AZUL_PPO_TAG the checkpoint within it,
+        // so a specific agent can be tried without a rebuild.
+        let dir = std::env::var("AZUL_PPO").unwrap_or_else(|_| "ppo".into());
+        let tag = std::env::var("AZUL_PPO_TAG").unwrap_or_else(|_| "best".into());
+        let opponent: Box<dyn players::Player<2, 6>> =
+            match PPOMoveSelector::<Backend>::from_checkpoint(&PathBuf::from(&dir), &tag, &device) {
+                Ok(ppo) => {
+                    log::info!("opponent: PPO checkpoint {dir}/checkpoint_{tag}_*");
+                    Box::new(ppo)
+                }
+                Err(e) => {
+                    log::info!("opponent: minimax (no PPO checkpoint: {e})");
+                    Box::new(player)
+                }
+            };
         Self {
             gs: Gamestate::new_2_player_with_seed(rand::random(), 0),
             config: UIConfig::default(),
             players: [
                 Player::Human,
-                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer)),
-                // Player::Ai(Box::new(azul_tiles_rs::players::MoveRankPlayer2)),
-                Player::Ai(Box::new(player)),
-                // Player::Ai(Box::new(ppo)),
+                Player::Ai(opponent),
             ],
             selection: Selection::default(),
         }

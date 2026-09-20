@@ -177,15 +177,33 @@ impl EvolvingPlayer for MoveSelectNN {
     }
 }
 
+/// Encode the gamestate from player 0's point of view.
 pub fn gs_to_array(gs: &Gamestate<2, 6>) -> SMatrix<f32, 150, 1> {
+    gs_to_array_for(gs, 0)
+}
+
+/// Encode the gamestate from `player`'s point of view.
+///
+/// The acting player's board always goes first. Without this the network reads
+/// board 0 as "mine" whoever is actually to move, so a model trained in seat 0
+/// and then seated at index 1 -- which is exactly what the GUI does -- plans
+/// using its opponent's board.
+pub fn gs_to_array_for(gs: &Gamestate<2, 6>, player: usize) -> SMatrix<f32, 150, 1> {
     let mut arr = SMatrix::zeros();
-    let a = pb_to_array(&gs.boards()[0]);
-    let b = pb_to_array(&gs.boards()[1]);
+    let a = pb_to_array(&gs.boards()[player]);
+    let b = pb_to_array(&gs.boards()[1 - player]);
     // board = 59 * 2 = 118
-    // factories = 5 * 6 = 30
-    // bag = 5
+    // factories = 5 * 6 = 30   (index 0 is the centre pile)
     // fp tile = 1
     // round = 1
+    //                          total = 150
+    //
+    // TODO: the bag is not encoded. The comment here used to claim `bag = 5`
+    // but the 150 slots are fully accounted for without it, so it was never
+    // written. The agent cannot see which colours remain to be drawn, so it
+    // cannot reason about whether a colour it needs is likely to reappear.
+    // Adding it means widening STATE_SIZE, which invalidates every existing
+    // checkpoint -- do it alongside another encoding change, not on its own.
     for (i, v) in a
         .into_iter()
         .copied()
@@ -202,6 +220,13 @@ pub fn gs_to_array(gs: &Gamestate<2, 6>) -> SMatrix<f32, 150, 1> {
     arr
 }
 
+/// TODO: the centre pile and the factories share this scaling, and should not.
+/// A factory holds at most 4 tiles, so these features top out around 0.8. The
+/// centre accumulates everything discarded during a round and can hold roughly
+/// 20 of one colour, so the identical five slots can reach ~4.0 for
+/// `factories[0]`. Same feature, order-of-magnitude different range, which is
+/// poor conditioning for the first layer. Either scale the centre by its own
+/// bound or encode it as a separate block.
 fn factory_to_array(factory: &TileGroup) -> [f32; 5] {
     factory.counts().map(|v| f32::from(v) / 5.0)
 }
@@ -228,7 +253,7 @@ fn pb_to_array(pb: &PlayerBoard) -> SMatrix<f32, 59, 1> {
         })
         .chain(wall_to_array(&pb.wall).into_iter().copied())
         .chain([
-            pb.floor.total().max(7) as f32 / 7.0,
+            pb.floor.total().min(7) as f32 / 7.0,
             pb.first_player_tile as u8 as f32,
             pb.score as f32 / 100.0,
             pb.predicted_score as f32 / 100.0,
@@ -261,7 +286,12 @@ mod test {
     fn move_from_index() {
         for i in 0..180 {
             let (s, t, d) = index_to_move(i);
-            println!("{} -> ({}, {}, {})", i, s, t, d);
+            assert!(s < 6, "source {s} out of range at index {i}");
+            assert!(t < 5, "tile {t} out of range at index {i}");
+            assert!(d < 6, "destination {d} out of range at index {i}");
+            // Must invert Move::to_index exactly, or the action mask and the
+            // move it selects refer to different moves.
+            assert_eq!(s * 30 + t * 6 + d, i);
         }
     }
 }

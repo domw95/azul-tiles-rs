@@ -13,7 +13,7 @@ pub mod ppo;
 /// Main function is [Player::pick_move]
 /// Gives read access to current gamestate
 /// and a list of possible moves
-pub trait Player<const P: usize, const F: usize>: DynClone {
+pub trait Player<const P: usize, const F: usize>: DynClone + Send {
     fn pick_move(&mut self, gamestate: &Gamestate<P, F>, moves: Vec<Move>) -> Move;
 
     fn name(&self) -> String;

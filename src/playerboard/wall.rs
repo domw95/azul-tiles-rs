@@ -328,9 +328,26 @@ mod test {
     #[test]
     fn wall_colours() {
         let mut wall = Wall::default();
-        dbg!(RowIndex::Two.tile_column(&Tile::Black));
+        assert!(
+            wall.iter().flat_map(|r| r.iter()).all(|t| t.is_none()),
+            "a fresh wall should be empty"
+        );
+
+        // A tile lands in the column its colour occupies for that row.
+        let column = RowIndex::Two.tile_column(&Tile::Black);
+        assert_eq!(
+            Tile::Black,
+            WALL_COLOURS[RowIndex::Two as usize][column as usize]
+        );
+
         wall.place_tile(RowIndex::One, Tile::Black);
-        // dbg!(wall);
+        let placed = RowIndex::One.tile_column(&Tile::Black);
+        assert_eq!(wall[(RowIndex::One, placed)], Some(Tile::Black));
+        assert_eq!(
+            wall.iter().flat_map(|r| r.iter()).filter(|t| t.is_some()).count(),
+            1,
+            "placing one tile should occupy exactly one cell"
+        );
     }
 
     #[test]

@@ -238,6 +238,17 @@ impl PlayerBoard {
     }
 }
 
+impl PlayerBoard {
+    /// Points the floor line will cost at the end of the round.
+    ///
+    /// Exposed because `predicted_score` is clamped at zero: once the floor
+    /// penalty exceeds the score there is no way to tell a clean board from a
+    /// badly littered one, which makes it useless as a training signal.
+    pub fn floor_penalty(&self) -> u8 {
+        floor_score(&self.floor, self.first_player_tile)
+    }
+}
+
 fn floor_score(tiles: &TileGroup, fp: bool) -> u8 {
     let total = tiles.total() + if fp { 1 } else { 0 };
     match total {

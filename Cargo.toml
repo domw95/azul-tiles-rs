@@ -16,10 +16,15 @@ name = "search"
 harness = false
 
 
+[features]
+# Train on the GPU via wgpu. Needs a Vulkan ICD installed.
+gpu = []
+
 [dependencies]
 strum = { version = "0.26.3", features = ["derive"] }
 minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git" }
 dyn-clone = "1.0.18"
+rayon = "1.11.0"
 eframe = "0.31.0"
 egui = "0.31.0"
 fxhash = "0.2.1"

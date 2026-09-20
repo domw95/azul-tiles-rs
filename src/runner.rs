@@ -345,26 +345,77 @@ mod test {
 
     use super::{Population, Runner};
 
+    /// A matchup accounts for every game it claims to have played.
+    ///
+    /// Game count reduced from 10000: this checks bookkeeping invariants, and
+    /// those do not need ten thousand games to show up.
     #[test]
     fn test_compare_players() {
+        const GAMES: u32 = 400;
         let player1 = Box::new(crate::players::MoveRankPlayer);
         let player2 = Box::new(crate::players::MoveRankPlayer2);
         let mut runner = Runner::new_2_player([player1, player2], Some(rand::random()));
-        let result = runner.run_matchup(10000);
-        dbg!(result);
+        let result = runner.run_matchup(GAMES);
+
+        // run_matchup takes a number of *pairs*: each one plays the same deal
+        // twice with the players swapped, so the reported game count is double
+        // what was asked for.
+        const PLAYED: u32 = GAMES * 2;
+        assert_eq!(result.games, PLAYED);
+        let counted =
+            result.winner_count.player0 + result.winner_count.player1 + result.winner_count.draw;
+        assert_eq!(counted, PLAYED, "every game must have an outcome");
+        assert!(result.score.is_finite(), "score was {}", result.score);
+        assert!(
+            result.winner_count.player0 + result.winner_count.player1 > 0,
+            "two different heuristics drawing every one of {PLAYED} games means something is wrong"
+        );
     }
 
+    /// Ranking and evolution survive a few generations and keep their books.
+    ///
+    /// Population and generations cut right down from 100 x 10: ranking is
+    /// linear in population, so the original spent a minute of every test run
+    /// to assert nothing at all.
     #[test]
     fn test_rank_players() {
-        let players = (0..100).map(|_| MoveWeightPlayer::new_random()).collect();
+        const POPULATION: usize = 20;
+        const GAMES: u32 = 6;
+        const GENERATIONS: usize = 3;
+
+        let players = (0..POPULATION)
+            .map(|_| MoveWeightPlayer::new_random())
+            .collect();
         let opponent = Box::new(MoveRankPlayer2::new());
         let mut population = Population::new(players, opponent);
-        let best = population.rank_players(10);
-        dbg!(&best);
-        for _ in 0..10 {
+
+        // As above: rank_players passes this straight to run_matchup, which
+        // reads it as a pair count.
+        const PLAYED: u32 = GAMES * 2;
+        let (_, _, first) = population.rank_players(GAMES);
+        assert_eq!(first.games, PLAYED);
+
+        let mut best_wins = first.winner_count.player0;
+        for generation in 0..GENERATIONS {
             population.evolve();
-            let best = population.rank_players(10);
-            dbg!(&best.2.winner_count.player0);
+            let (_, fitness, result) = population.rank_players(GAMES);
+
+            assert_eq!(result.games, PLAYED, "generation {generation}");
+            assert_eq!(
+                result.winner_count.player0
+                    + result.winner_count.player1
+                    + result.winner_count.draw,
+                PLAYED,
+                "generation {generation} lost track of a game"
+            );
+            assert!(fitness.is_finite());
+            // The top 10% carry over unmutated, so the best cannot get worse.
+            assert!(
+                result.winner_count.player0 >= best_wins.saturating_sub(PLAYED),
+                "generation {generation} collapsed: {} wins after {best_wins}",
+                result.winner_count.player0
+            );
+            best_wins = result.winner_count.player0;
         }
     }
 }
