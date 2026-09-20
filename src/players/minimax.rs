@@ -13,6 +13,10 @@ impl minimaxer::Gamestate<gamestate::Move> for gamestate::Gamestate<2, 6> {
         gamestate::Gamestate::play_move(self, *m);
     }
 
+    fn position_key(&self) -> u64 {
+        gamestate::Gamestate::position_key(self)
+    }
+
     fn is_terminal(&mut self) -> bool {
         gamestate::Gamestate::is_round_over(self)
     }

@@ -49,6 +49,24 @@ pub const WALL_COLOURS: [[Tile; 5]; 5] = [
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Wall([[Option<Tile>; 5]; 5]);
 
+impl std::hash::Hash for Wall {
+    /// Every cell's colour is fixed by its position, so occupancy alone
+    /// describes the wall. Hashing one u32 rather than 25 `Option<Tile>`
+    /// makes building a position key an order of magnitude cheaper, and two
+    /// walls are equal exactly when their occupancy matches.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let mut mask: u32 = 0;
+        for (r, row) in self.0.iter().enumerate() {
+            for (c, cell) in row.iter().enumerate() {
+                if cell.is_some() {
+                    mask |= 1 << (r * 5 + c);
+                }
+            }
+        }
+        state.write_u32(mask);
+    }
+}
+
 impl Index<(RowIndex, ColumnIndex)> for Wall {
     type Output = Option<Tile>;
 

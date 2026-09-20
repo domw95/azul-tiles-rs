@@ -14,7 +14,7 @@ use crate::{
 };
 
 /// Line of tiles on board
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Row(Option<(Tile, u8)>);
 
 impl Row {
@@ -39,7 +39,7 @@ impl Row {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct PlayerBoard {
     /// Wall of tiles
     pub wall: Wall,

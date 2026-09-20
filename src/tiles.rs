@@ -9,7 +9,7 @@ use strum::IntoEnumIterator;
 
 /// Types of tiles
 /// These are in the order as they appear on the first row of the wall
-#[derive(Debug, Clone, Copy, PartialEq, Eq, strum::EnumIter)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, strum::EnumIter)]
 pub enum Tile {
     Blue,
     Yellow,
@@ -53,6 +53,14 @@ impl AddAssign for TileGroup {
         for (count, tile) in other.into_iter() {
             self.counts[tile as usize] += count;
         }
+    }
+}
+
+impl std::hash::Hash for TileGroup {
+    /// Five counts packed into one word instead of five separate writes.
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        let c = self.counts;
+        state.write_u64(u64::from_le_bytes([c[0], c[1], c[2], c[3], c[4], 0, 0, 0]));
     }
 }
 

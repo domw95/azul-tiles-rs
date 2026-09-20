@@ -141,6 +141,24 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
         self.round += 1;
     }
 
+    /// Key identifying this position for a transposition table.
+    ///
+    /// Covers everything the position's value depends on: both boards, every
+    /// factory, the first player tile and whose turn it is. The rng is
+    /// deliberately left out. It only advances when a round is dealt, which a
+    /// search never does, so including it would make identical positions
+    /// reached from different games look distinct for no reason.
+    pub fn position_key(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = fxhash::FxHasher64::default();
+        self.boards.hash(&mut h);
+        self.factories.hash(&mut h);
+        self.first_player_tile.hash(&mut h);
+        self.current_player.hash(&mut h);
+        // 0 means "no key" to the search, so never return it.
+        h.finish() | 1
+    }
+
     /// True when no moves remain, i.e. every factory is empty.
     /// Equivalent to `get_moves().is_empty()` but allocation free: a floor
     /// move is always generated for any tile still sitting in a factory.

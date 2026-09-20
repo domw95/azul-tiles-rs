@@ -68,7 +68,17 @@ fn fixed_depth(depth: u8) -> (u64, Duration, u64) {
         let mut n = minimaxer::negamax::Negamax::new(
             Node::new(g),
             ScoreEvaluator,
-            SearchOptions { max_depth: Some(depth), alpha_beta: true, ..Default::default() },
+            SearchOptions {
+                max_depth: Some(depth),
+                alpha_beta: true,
+                tt_bits: std::env::var("TT_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+                sort_on_create: std::env::var("SORT_ON_CREATE").is_ok(),
+                sort_on_create_min_depth: std::env::var("SOC_MIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
+                ..Default::default()
+            },
         );
         let t = Instant::now();
         let r = n.search();
@@ -95,6 +105,12 @@ fn iterative(depth: u8, pre_sort: bool) -> (u64, Duration, u64) {
                 alpha_beta: true,
                 iterative: true,
                 pre_sort,
+                tt_bits: std::env::var("TT_BITS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+                sort_on_create: std::env::var("SORT_ON_CREATE").is_ok(),
+                sort_on_create_min_depth: std::env::var("SOC_MIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
                 ..Default::default()
             },
         );
@@ -123,6 +139,11 @@ fn iterative_opts(depth: u8, path_len: bool, rand_best: bool, rand_w: f32) -> (u
                 iterative: true,
                 pre_sort: true,
                 prune_by_path_length: path_len,
+                sort_on_create: std::env::var("SORT_ON_CREATE").is_ok(),
+                sort_on_create_min_depth: std::env::var("SOC_MIN")
+                    .ok()
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(0),
                 random_best: rand_best,
                 random_weight: rand_w,
                 keep_equal_siblings: path_len,
@@ -416,5 +437,13 @@ fn engine_micro() {
         }
     }
     println!("evaluate (heuristic) {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
+
+    let t = Instant::now();
+    for _ in 0..reps {
+        for g in &states {
+            std::hint::black_box(g.position_key());
+        }
+    }
+    println!("position_key         {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
     println!("\n(acc {acc})");
 }
