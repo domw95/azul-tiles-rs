@@ -10,9 +10,14 @@ use std::time::Duration;
 
 type B = Autodiff<NdArray>;
 
+/// Opponent search depth, from AZUL_DEPTH.
+fn opponent_depth() -> u8 {
+    std::env::var("AZUL_DEPTH").ok().and_then(|v| v.parse().ok()).unwrap_or(1)
+}
+
 fn depth1() -> Minimaxer<ScoreEvaluator> {
     Minimaxer::new(
-        SearchOptions { max_depth: Some(1), ..Default::default() },
+        SearchOptions { max_depth: Some(opponent_depth()), alpha_beta: true, sort_on_create: true, sort_on_create_min_depth: 1, tt_bits: 20, ..Default::default() },
         "Depth1",
         ScoreEvaluator,
     )
@@ -80,6 +85,8 @@ fn main() {
             eval_every: 5,
             lr_decay,
             lr_start_episode,
+            // Restore Adam moments from the same directory as the weights.
+            resume_optimiser: resume.as_ref().map(std::path::PathBuf::from),
             learning_rate,
             stop: StopCondition {
                 // The 40-game in-loop eval reads ~1.4-2x higher than a

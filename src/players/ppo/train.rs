@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use burn::nn::loss::{HuberLoss, Reduction};
+use burn::record::{DefaultFileRecorder, FullPrecisionSettings, Recorder};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::activation::log_softmax;
 use burn::tensor::backend::AutodiffBackend;
@@ -172,6 +173,13 @@ pub struct TrainOptions {
     pub lr_decay: f64,
     /// Episodes between applications of [`Self::lr_decay`].
     pub lr_decay_every: usize,
+    /// Directory to restore optimiser state from, alongside the weights.
+    ///
+    /// Adam carries per-parameter moment estimates. Restoring the weights
+    /// without them restarts those at zero, so the first steps after a resume
+    /// are effectively unwarmed and can undo a converged policy -- which is
+    /// exactly what happened to a 4600-episode run resumed without this.
+    pub resume_optimiser: Option<PathBuf>,
     /// Offset added to the episode index when computing the decayed rate.
     ///
     /// For resuming: a continued run must pick the schedule up where it left
@@ -232,6 +240,7 @@ impl Default for TrainOptions {
             lr_decay: 1.0,
             lr_decay_every: 500,
             lr_start_episode: 0,
+            resume_optimiser: None,
             grad_clip_norm: Some(0.5),
             entropy_coeff: 0.01,
             terminal_reward: 1.0,
@@ -335,6 +344,24 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
         };
         let mut policy_optimiser = adam().init();
         let mut critic_optimiser = adam().init();
+
+        let optim_recorder = DefaultFileRecorder::<FullPrecisionSettings>::default();
+        if let Some(from) = &self.options.resume_optimiser {
+            match (
+                optim_recorder.load(from.join("optim_best_policy"), &self.device),
+                optim_recorder.load(from.join("optim_best_value"), &self.device),
+            ) {
+                (Ok(p), Ok(v)) => {
+                    policy_optimiser = policy_optimiser.load_record(p);
+                    critic_optimiser = critic_optimiser.load_record(v);
+                    println!("restored optimiser state from {}", from.display());
+                }
+                _ => println!(
+                    "no optimiser state at {} -- Adam moments start from zero",
+                    from.display()
+                ),
+            }
+        }
 
         let mut ppo = self.ppo;
         let opponent = self.opponent;
@@ -475,6 +502,20 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                 best = eval;
                 best_episode = episode;
                 ppo.save(&options.dir, "best").unwrap();
+                // Save the optimiser alongside, so a continuation resumes with
+                // Adam's moments rather than re-warming from zero.
+                optim_recorder
+                    .record(
+                        policy_optimiser.to_record(),
+                        options.dir.join("optim_best_policy"),
+                    )
+                    .unwrap();
+                optim_recorder
+                    .record(
+                        critic_optimiser.to_record(),
+                        options.dir.join("optim_best_value"),
+                    )
+                    .unwrap();
             }
             if smooth > best_smoothed {
                 best_smoothed = smooth;
