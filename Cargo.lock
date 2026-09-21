@@ -4134,7 +4134,7 @@ checksum = "68354c5c6bd36d73ff3feceb05efa59b6acb7626617f4962be322a825e61f79a"
 [[package]]
 name = "minimaxer"
 version = "0.1.0"
-source = "git+ssh://git@github.com/domw95/minimaxer-rs.git#d340732c7cd59cf3a844c40880214f88e3c225ac"
+source = "git+ssh://git@github.com/domw95/minimaxer-rs.git#ad655274549d158691e7227bb9448183305dbfec"
 dependencies = [
  "atomic_float",
  "burn",
