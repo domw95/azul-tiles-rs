@@ -529,6 +529,7 @@ fn depth_probe(max_depth: u8, plies_in: usize, seed: u64) {
             pre_sort: true,
             sort_on_create: std::env::var("SOC").is_ok(),
             tt_bits: std::env::var("TT").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            retain_depth: std::env::var("RETAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
             ..Default::default()
         },
     );
@@ -628,6 +629,7 @@ fn gen_game(cap: u8, seed: u64, tt_bits: u8) -> (usize, usize, f64, f64) {
                 iterative: true,
                 pre_sort: true,
                 tt_bits,
+                retain_depth: std::env::var("RETAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
                 max_depth: Some(cap),
                 ..Default::default()
             },
