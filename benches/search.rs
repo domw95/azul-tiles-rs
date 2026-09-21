@@ -291,6 +291,45 @@ fn main() {
         transposition_rate(depth, args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3));
         return;
     }
+    if mode == "analyse" {
+        let tt: u8 = std::env::var("TT").ok().and_then(|v| v.parse().ok()).unwrap_or(20);
+        println!("{:>6} {:>10} {:>12} {:>12} {:>9}  {}", "seed", "positions", "fresh_ms", "reuse_ms", "speedup", "checksums match");
+        for seed in 1..=3u64 {
+            let (p1, ms1, c1) = analyse_game(depth, seed, tt, false);
+            let (p2, ms2, c2) = analyse_game(depth, seed, tt, true);
+            println!("{:>6} {:>10} {:>12.0} {:>12.0} {:>8.2}x  {}",
+                seed, p1, ms1, ms2, ms1 / ms2, if c1 == c2 && p1 == p2 { "yes" } else { "NO" });
+        }
+        return;
+    }
+    if mode == "gen" {
+        let cap: u8 = depth;
+        let tt: u8 = std::env::var("TT").ok().and_then(|v| v.parse().ok()).unwrap_or(18);
+        println!("{:>6} {:>10} {:>8} {:>10} {:>10} {:>10}", "seed", "positions", "exact", "total_s", "peak_ms", "pos/hour");
+        let (mut tp, mut tms) = (0usize, 0.0f64);
+        for seed in 1..=3u64 {
+            let (pos, exact, ms, peak) = if std::env::var("REUSE").is_ok() {
+                gen_game_reuse(cap, seed, tt)
+            } else {
+                gen_game(cap, seed, tt)
+            };
+            tp += pos; tms += ms;
+            println!("{:>6} {:>10} {:>7.0}% {:>10.1} {:>10.0} {:>10.0}",
+                seed, pos, 100.0 * exact as f64 / pos as f64, ms / 1000.0, peak,
+                3_600_000.0 / (ms / pos as f64));
+        }
+        println!("\ncap={cap} tt=2^{tt}: {:.0} positions/hour on one core, {:.1}s per game, peak RSS {:.0} MiB",
+            3_600_000.0 / (tms / tp as f64), tms / 1000.0 / 3.0, unsafe { PEAK_RSS });
+        return;
+    }
+    if mode == "depth" {
+        depth_probe(
+            depth,
+            args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0),
+            args.get(4).and_then(|s| s.parse().ok()).unwrap_or(12),
+        );
+        return;
+    }
     if mode == "size" {
         println!("gamestate_bytes={}", std::mem::size_of::<Gamestate<2, 6>>());
         println!("node_bytes={}", std::mem::size_of::<Node<Gamestate<2, 6>, Move>>());
@@ -446,4 +485,219 @@ fn engine_micro() {
     }
     println!("position_key         {:>8.1} ns", t.elapsed().as_nanos() as f64 / n);
     println!("\n(acc {acc})");
+}
+
+/// Cost per depth from the opening, and whether the search can see to the end
+/// of the round.
+///
+/// A round ends when every factory is empty, and the search treats that as
+/// terminal, so `Exhaustive` means every line reached the round's end. Node
+/// counts and the exit reason are deterministic; only the timings care about
+/// machine load.
+fn depth_probe(max_depth: u8, plies_in: usize, seed: u64) {
+    use minimaxer::SearchExit;
+    let mut g = Gamestate::<2, 6>::new_2_player_with_seed(seed, 0);
+    // Optionally advance into the round first, to see how the cost falls as
+    // the factories empty.
+    let mut rng = Lcg(seed ^ 99);
+    for _ in 0..plies_in {
+        let mv = g.get_moves();
+        if mv.is_empty() {
+            break;
+        }
+        let m = mv[rng.next() as usize % mv.len()];
+        g.play_move(m);
+    }
+    let tiles: u32 = g.factories().iter().flatten().map(|f| f.total() as u32).sum();
+    println!(
+        "\nseed {seed}, opening + {plies_in} plies: {} tiles left, {} legal moves",
+        tiles,
+        g.get_moves().len()
+    );
+    fn rss_mib() -> f64 {
+        let s = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+        let pages: u64 = s.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+        (pages * 4096) as f64 / 1048576.0
+    }
+    println!("{:>5} {:>12} {:>11} {:>10} {:>11} {:>11} {:>12}",
+        "depth", "nodes", "ms", "RSS_MiB", "tt_hits", "tt_stores", "exit");
+    let mut n = minimaxer::negamax::Negamax::new(
+        Node::new(g),
+        ScoreEvaluator,
+        SearchOptions {
+            alpha_beta: true,
+            pre_sort: true,
+            sort_on_create: std::env::var("SOC").is_ok(),
+            tt_bits: std::env::var("TT").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            retain_depth: std::env::var("RETAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+            ..Default::default()
+        },
+    );
+    for d in 1..=max_depth {
+        n.options.max_depth = Some(d);
+        let t = Instant::now();
+        let r = n.search();
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        let (hits, stores) = n.tt_stats();
+        println!("{:>5} {:>12} {:>11.1} {:>10.0} {:>11} {:>11} {:>12}",
+            d, r.nodes, ms, rss_mib(), hits, stores, format!("{:?}", r.exit));
+        if r.exit == SearchExit::Exhaustive {
+            println!("  -> sees the whole round at depth {d}");
+            return;
+        }
+    }
+    println!("  -> did not reach the end of the round within {max_depth} plies");
+}
+
+/// Same game generation, but keeping the tree between moves.
+///
+/// `advance` re-roots onto the subtree of the move actually played, so the next
+/// search starts with that subtree already searched to depth-1 and already
+/// ordered, instead of rebuilding from nothing. The transposition table carries
+/// over too.
+fn gen_game_reuse(cap: u8, seed: u64, tt_bits: u8) -> (usize, usize, f64, f64) {
+    use minimaxer::SearchExit;
+    let mut g = Gamestate::<2, 6>::new_2_player_with_seed(seed, 0);
+    let (mut positions, mut exact) = (0usize, 0usize);
+    let (mut total_ms, mut peak_ms) = (0.0f64, 0.0f64);
+    let mut search = minimaxer::negamax::Negamax::new(
+        Node::new(g.clone()),
+        ScoreEvaluator,
+        SearchOptions {
+            alpha_beta: true,
+            iterative: true,
+            pre_sort: true,
+            tt_bits,
+            max_depth: Some(cap),
+            ..Default::default()
+        },
+    );
+    loop {
+        if g.is_round_over() {
+            if g.end_round() == azul_tiles_rs::gamestate::State::GameEnd {
+                break;
+            }
+            // A new deal invalidates the retained tree, so start it over.
+            search.replace_gamestate(g.clone());
+            continue;
+        }
+        let t = Instant::now();
+        let r = search.search();
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        total_ms += ms;
+        peak_ms = peak_ms.max(ms);
+        positions += 1;
+        {
+            let st = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: u64 = st.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mib = (pages * 4096) as f64 / 1048576.0;
+            unsafe { if mib > PEAK_RSS { PEAK_RSS = mib; } }
+        }
+        if r.exit == SearchExit::Exhaustive {
+            exact += 1;
+        }
+        g.play_move(r.best);
+        search.play_move(&r.best);
+    }
+    (positions, exact, total_ms, peak_ms)
+}
+
+/// Cost of generating one complete labelled game, to size a dataset run.
+///
+/// Uses the round structure: aim for an exact answer (Exhaustive) and fall
+/// back to a depth cap only where that is unaffordable, which is the first
+/// few plies of each round.
+static mut PEAK_RSS: f64 = 0.0;
+
+fn gen_game(cap: u8, seed: u64, tt_bits: u8) -> (usize, usize, f64, f64) {
+    use minimaxer::SearchExit;
+    let mut g = Gamestate::<2, 6>::new_2_player_with_seed(seed, 0);
+    let (mut positions, mut exact) = (0usize, 0usize);
+    let (mut total_ms, mut peak_ms) = (0.0f64, 0.0f64);
+    loop {
+        if g.is_round_over() {
+            if g.end_round() == azul_tiles_rs::gamestate::State::GameEnd {
+                break;
+            }
+            continue;
+        }
+        let mut n = minimaxer::negamax::Negamax::new(
+            Node::new(g.clone()),
+            ScoreEvaluator,
+            SearchOptions {
+                alpha_beta: true,
+                iterative: true,
+                pre_sort: true,
+                tt_bits,
+                retain_depth: std::env::var("RETAIN").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
+                max_depth: Some(cap),
+                ..Default::default()
+            },
+        );
+        let t = Instant::now();
+        let r = n.search();
+        let ms = t.elapsed().as_secs_f64() * 1000.0;
+        total_ms += ms;
+        peak_ms = peak_ms.max(ms);
+        positions += 1;
+        {
+            let st = std::fs::read_to_string("/proc/self/statm").unwrap_or_default();
+            let pages: u64 = st.split_whitespace().nth(1).and_then(|v| v.parse().ok()).unwrap_or(0);
+            let mib = (pages * 4096) as f64 / 1048576.0;
+            unsafe { if mib > PEAK_RSS { PEAK_RSS = mib; } }
+        }
+        if r.exit == SearchExit::Exhaustive {
+            exact += 1;
+        }
+        g.play_move(r.best);
+    }
+    (positions, exact, total_ms, peak_ms)
+}
+
+/// Analysing a *fixed* game: the move sequence is given, so both variants do
+/// identical work and the only difference is whether the tree is kept.
+///
+/// This is the game-analysis case: replay a recorded game and search every
+/// position. Re-rooting onto the played move's subtree should mean the next
+/// search starts already ordered.
+fn analyse_game(cap: u8, seed: u64, tt_bits: u8, reuse: bool) -> (usize, f64, u64) {
+    let mut g = Gamestate::<2, 6>::new_2_player_with_seed(seed, 0);
+    // Fixed move sequence, chosen deterministically and independently of the
+    // search, so both variants analyse exactly the same positions.
+    let mut rng = Lcg(seed ^ 0xA5A5);
+    let opts = SearchOptions {
+        alpha_beta: true,
+        iterative: true,
+        pre_sort: true,
+        tt_bits,
+        max_depth: Some(cap),
+        ..Default::default()
+    };
+    let mut search = minimaxer::negamax::Negamax::new(Node::new(g.clone()), ScoreEvaluator, opts);
+    let (mut positions, mut total_ms, mut sum) = (0usize, 0.0f64, 0u64);
+    loop {
+        if g.is_round_over() {
+            if g.end_round() == azul_tiles_rs::gamestate::State::GameEnd {
+                break;
+            }
+            search.replace_gamestate(g.clone());
+            continue;
+        }
+        if !reuse {
+            search = minimaxer::negamax::Negamax::new(Node::new(g.clone()), ScoreEvaluator, opts);
+        }
+        let t = Instant::now();
+        let r = search.search();
+        total_ms += t.elapsed().as_secs_f64() * 1000.0;
+        positions += 1;
+        sum = sum.wrapping_mul(31).wrapping_add(r.value.to_bits() as u64);
+        // The move played is from the record, not from the search.
+        let moves = g.get_moves();
+        let played = moves[rng.next() as usize % moves.len()];
+        g.play_move(played);
+        if reuse {
+            search.play_move(&played);
+        }
+    }
+    (positions, total_ms, sum)
 }

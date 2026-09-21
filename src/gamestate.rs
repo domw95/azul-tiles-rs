@@ -43,8 +43,13 @@ impl Gamestate<2, 6> {
         Self::new(seed, first_player)
     }
 
+    /// Player 0's predicted lead, the absolute value negamax expects.
+    ///
+    /// Reads the unclamped `predicted_eval` rather than `predicted_score`, so
+    /// that a floor penalty big enough to wipe out a board still orders the
+    /// moves that caused it.
     pub fn differential_predicted_score(&self) -> f32 {
-        self.boards[0].predicted_score as f32 - self.boards[1].predicted_score as f32
+        f32::from(self.boards[0].predicted_eval) - f32::from(self.boards[1].predicted_eval)
     }
 }
 
