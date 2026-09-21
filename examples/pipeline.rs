@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 //! Clone a teacher from a multi-depth label set and initialise the critic.
 //! Args: <labels_dir> <depth> <out_dir> [policy_epochs] [value_epochs]
-use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, pretrain_value, MultiDataset};
+use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, pretrain_value, CloneStop, MultiDataset};
 use azul_tiles_rs::players::ppo::{PPOConfig, PPOMoveSelector};
 // Cloning is pure batched supervised training over a fixed dataset -- large
 // matmuls, no sequential dependency, no per-sample device syncs -- so unlike
@@ -17,7 +17,7 @@ fn main() {
     let dir = std::path::PathBuf::from(&a[1]);
     let depth: u8 = a[2].parse().unwrap();
     let out = std::path::PathBuf::from(&a[3]);
-    let pe: usize = a.get(4).map(|v| v.parse().unwrap()).unwrap_or(10);
+    let max_epochs: usize = a.get(4).map(|v| v.parse().unwrap()).unwrap_or(200);
     let ve: usize = a.get(5).map(|v| v.parse().unwrap()).unwrap_or(6);
 
     let multi = MultiDataset::load_dir(&dir, "shard_").expect("labels");
@@ -34,7 +34,15 @@ fn main() {
 
     let t0 = std::time::Instant::now();
     let ppo = PPOMoveSelector::<B>::new(PPOConfig::default(), &device);
-    let ppo = behaviour_clone(ppo, data, pe, 256, 0.001, &device);
+    let (ppo, summary) = behaviour_clone(
+        ppo,
+        data,
+        CloneStop { max_epochs, ..Default::default() },
+        256,
+        0.001,
+        &device,
+    );
+    println!("clone: {summary:?}");
     let ppo = pretrain_value(ppo, data, &multi.values[di], ve, 256, 0.001, &device);
 
     std::fs::create_dir_all(&out).unwrap();

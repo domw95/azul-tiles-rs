@@ -356,6 +356,11 @@ impl MultiDataset {
 
 /// Initialise the value head from a search's root evaluations.
 ///
+/// TODO: this still has the flaw `behaviour_clone` just lost -- a fixed epoch
+/// count and no best-model selection. Left alone because it is unused:
+/// initialising the critic from search values measured as a null (+0.94 on
+/// held-out search values, +0.01 transfer to RL returns).
+///
 /// Caveat on the target: reinforcement learning trains the critic to predict
 /// the *return*, the discounted sum of future per-move rewards, whereas a
 /// search returns the differential score as it stands now. Those are not the
@@ -446,6 +451,37 @@ pub fn pretrain_value<B: AutodiffBackend>(
     ppo
 }
 
+/// When to stop cloning.
+///
+/// This used to be a bare epoch count chosen by feel, returning whatever the
+/// last epoch produced. Both are flaws: a 16-epoch run was still gaining
+/// validation agreement when it stopped, and once a run does start
+/// overfitting, returning the last epoch silently keeps the worse model.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneStop {
+    /// Hard cap.
+    pub max_epochs: usize,
+    /// Stop after this many epochs with no improvement in validation agreement.
+    pub patience: usize,
+    /// Improvement smaller than this does not count as progress.
+    pub min_delta: f32,
+}
+
+impl Default for CloneStop {
+    fn default() -> Self {
+        Self { max_epochs: 200, patience: 5, min_delta: 0.0005 }
+    }
+}
+
+/// What a cloning run produced.
+#[derive(Debug, Clone, Copy)]
+pub struct CloneSummary {
+    pub epochs_run: usize,
+    pub best_epoch: usize,
+    pub best_val: f32,
+    pub stopped_early: bool,
+}
+
 /// Train the policy to reproduce the teacher's choices by cross-entropy.
 ///
 /// Only the policy is touched; the critic is left to reinforcement learning,
@@ -453,18 +489,26 @@ pub fn pretrain_value<B: AutodiffBackend>(
 pub fn behaviour_clone<B: AutodiffBackend>(
     mut ppo: PPOMoveSelector<B>,
     data: DataView<'_>,
-    epochs: usize,
+    stop: CloneStop,
     batch_size: usize,
     learning_rate: f64,
     device: &B::Device,
-) -> PPOMoveSelector<B> {
+) -> (PPOMoveSelector<B>, CloneSummary) {
     let mut optimiser = AdamConfig::new().init();
+    // Snapshot of the best policy by validation agreement, so a run that
+    // starts overfitting still returns its best model rather than its last.
+    let mut best_policy = ppo.policy.clone();
+    let mut best_val = f32::NEG_INFINITY;
+    let mut best_epoch = 0usize;
+    let mut epochs_run = 0usize;
+    let mut stopped_early = false;
     // Hold out the tail as validation: training agreement alone cannot tell
     // "too small to fit" from "memorising".
     let n = data.len() * 9 / 10;
     let val = data.len() - n;
 
-    for epoch in 0..epochs {
+    for epoch in 0..stop.max_epochs {
+        epochs_run = epoch + 1;
         let (mut total, mut batches, mut correct) = (0.0f32, 0usize, 0usize);
         for start in (0..n).step_by(batch_size) {
             let end = (start + batch_size).min(n);
@@ -541,14 +585,40 @@ pub fn behaviour_clone<B: AutodiffBackend>(
                 .into_scalar()
                 .to_usize();
         }
+        let val_acc = val_correct as f32 / val.max(1) as f32;
+        let improved = val_acc > best_val + stop.min_delta;
+        if improved {
+            best_val = val_acc;
+            best_epoch = epoch;
+            best_policy = ppo.policy.clone();
+        }
         println!(
-            "bc epoch {epoch}: loss {:.4}, train {:.1}%, val {:.1}%",
+            "bc epoch {epoch}: loss {:.4}, train {:.1}%, val {:.1}%{}",
             total / batches.max(1) as f32,
             100.0 * correct as f32 / n as f32,
-            100.0 * val_correct as f32 / val.max(1) as f32
+            100.0 * val_acc,
+            if improved { " *" } else { "" }
+        );
+        if epoch >= best_epoch + stop.patience {
+            println!(
+                "bc stopped: no validation gain for {} epochs; best {:.1}% at epoch {best_epoch}",
+                stop.patience,
+                100.0 * best_val
+            );
+            stopped_early = true;
+            break;
+        }
+    }
+
+    if !stopped_early {
+        println!(
+            "bc hit the epoch cap at {epochs_run}; best {:.1}% at epoch {best_epoch} -- raise max_epochs if that is near the end",
+            100.0 * best_val
         );
     }
-    ppo
+    // Return the best, not the last.
+    ppo.policy = best_policy;
+    (ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early })
 }
 
 #[cfg(test)]

@@ -1,5 +1,5 @@
 //! Does the depth-2 policy need a bigger network? Args: <dataset> <epochs>
-use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, Dataset};
+use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, CloneStop, Dataset};
 use azul_tiles_rs::players::ppo::{PPOConfig, PPOMoveSelector, PolicyConfig, ValueConfig, STATE_SIZE};
 use burn::backend::{Autodiff, NdArray};
 
@@ -22,7 +22,7 @@ fn main() {
             &device,
         );
         let t0 = std::time::Instant::now();
-        let trained = behaviour_clone(ppo, data.view(), epochs, 256, 0.001, &device);
+        let (trained, _) = behaviour_clone(ppo, data.view(), CloneStop { max_epochs: epochs, ..Default::default() }, 256, 0.001, &device);
         let dir = std::path::PathBuf::from(format!("/tmp/bccap_{hidden}_{layers}"));
         std::fs::create_dir_all(&dir).unwrap();
         trained.save(&dir, "best").unwrap();

@@ -222,6 +222,9 @@ pub struct TrainOptions {
     /// baseline stays consistent with what the critic predicts.
     pub normalise_value_targets: bool,
     /// Directory checkpoints are written to.
+    ///
+    /// A `metrics.jsonl` is written here too, one line per evaluation, for the
+    /// dashboard to read.
     pub dir: PathBuf,
     pub stop: StopCondition,
 }
@@ -497,6 +500,35 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                 eval.mean_score
             );
             last_ev = ev;
+
+            // One JSON object per evaluation. Append-only and flushed each
+            // time, so a reader always sees a complete prefix even if the run
+            // dies mid-write -- which is how these runs have tended to end.
+            if let Ok(mut f) = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(options.dir.join("metrics.jsonl"))
+            {
+                use std::io::Write as _;
+                let _ = writeln!(
+                    f,
+                    r#"{{"t":{},"episode":{},"states":{},"lr":{:.3e},"ev":{:.4},"win":{:.4},"margin":{:.3},"smoothed":{:.3},"score":{:.3},"best_margin":{:.3},"best_episode":{}}}"#,
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    episode,
+                    data.len(),
+                    lr,
+                    ev,
+                    eval.win_rate,
+                    eval.margin,
+                    smooth,
+                    eval.mean_score,
+                    if best.margin.is_finite() { best.margin } else { 0.0 },
+                    best_episode
+                );
+            }
 
             if eval.margin > best.margin {
                 best = eval;
