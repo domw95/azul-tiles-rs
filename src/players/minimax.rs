@@ -150,32 +150,66 @@ pub fn features_with(
 pub struct Weights(pub [f32; N_FEATURES]);
 
 impl Default for Weights {
-    /// Score in points, then hand set values for the first player tile and the
-    /// centre weighting.
+    /// Fitted by least squares on 15,000 round end positions labelled with the
+    /// final score margin of the game they came from, then rescaled so the
+    /// score term weighs one point.
     ///
-    /// The forecast buckets are zero deliberately. The term measured at 49.1%
-    /// +/- 2.4 over 1600 games against the same evaluator without it, so it
-    /// buys nothing, and at zero weight [`HeuristicEvaluator::new`] skips the
-    /// work rather than merely muting it. Use [`Weights::with_ts_forecast`] to
-    /// switch it back on for an ablation or a retune.
+    /// Beats the hand set vector by 6.2 points over 1800 games at depth 3, two
+    /// independent runs agreeing to 0.5, and by a predicted 5.4 under a clock
+    /// once its node cost is charged at the measured 8.0 points per halving.
+    /// Fixed time runs on the machine this was measured on have a run to run
+    /// spread of +/-5, so they could neither confirm nor refute that; the depth
+    /// 3 screen reproduces to 0.6 and is what this rests on.
+    ///
+    /// Two of the forecast buckets are negative, which the hand set values
+    /// could not express: a line still needing three or four tiles is a
+    /// liability, not a discounted asset.
     fn default() -> Self {
-        Self([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
+        Self([
+            1.0,
+            1.4792728,
+            2.1410458,
+            0.3069138,
+            0.10572213,
+            -0.11700917,
+            -0.29516673,
+        ])
     }
 }
 
 impl Weights {
+    /// The hand set vector this started from: score in points, first player
+    /// tile at 0.5, centre weighting at 1.0, no forecast term.
+    ///
+    /// Kept as the baseline the fitted default is measured against, and so that
+    /// constructors wanting the original term set do not silently follow
+    /// [`Default`] when it is retuned.
+    pub fn hand_set() -> Self {
+        Self([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
+    }
+
     /// The forecast bucket values implied by the TypeScript evaluation at round
     /// one, which is where the ported term started.
     ///
-    /// Kept so the term can be switched on without rediscovering the numbers,
-    /// not because they are good: least squares on 15,000 round end positions
-    /// preferred 0.307, 0.106, -0.117, -0.295, and neither set beat leaving the
-    /// term off.
+    /// Kept for ablation, not because they are good: two of the four have the
+    /// wrong sign, and 1/(missing+0.5) cannot express a negative. With these
+    /// values the term measured dead neutral at depth 3 while costing 10% of
+    /// nodes; with the fitted values it is worth about 3 points.
     pub const TS_FORECAST: [f32; 4] = [0.4, 0.24, 0.17, 0.13];
 
     /// Turn the forecast term on with its original hand set values.
     pub fn with_ts_forecast(mut self) -> Self {
         self.0[FORECAST_BASE..].copy_from_slice(&Self::TS_FORECAST);
+        self
+    }
+
+    /// Zero the forecast buckets. [`HeuristicEvaluator::new`] then skips the
+    /// partial line scan rather than merely muting it, so this really is the
+    /// cheaper evaluator.
+    pub fn without_forecast(mut self) -> Self {
+        for w in &mut self.0[FORECAST_BASE..] {
+            *w = 0.0;
+        }
         self
     }
 
@@ -212,7 +246,7 @@ impl HeuristicEvaluator {
     }
 
     pub fn new_no_wall_weight(fp_weight: f32) -> Self {
-        let mut weights = Weights::default();
+        let mut weights = Weights::hand_set();
         weights.0[1] = fp_weight;
         weights.0[2] = 0.0;
         Self::new(weights)
@@ -222,11 +256,11 @@ impl HeuristicEvaluator {
     /// first player tile and centre weighting, with the wall term differential
     /// rather than one sided.
     ///
-    /// Identical to [`Default`] now that the forecast term defaults off, but
-    /// named so a before/after on the wall term bug says what it is measuring
-    /// and keeps saying it if the default ever changes again.
+    /// Exists so a before/after on the wall term bug measures only that bug,
+    /// rather than the bug fix, the forecast term and the retuned weights
+    /// summed together.
     pub fn new_pre_forecast() -> Self {
-        Self::new(Weights::default())
+        Self::new(Weights::hand_set())
     }
 
     pub fn weights(&self) -> Weights {

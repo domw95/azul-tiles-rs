@@ -72,6 +72,8 @@ fn main() {
     let depth: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
     let ridge: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(1.0);
 
+    // Generate with whatever currently ships, so the position distribution
+    // matches where the fitted weights will actually be used.
     let start = Weights::default();
     println!("generating {games} games at depth {depth}");
 
@@ -146,7 +148,7 @@ fn main() {
     let mut score_only = Weights([0.0; N_FEATURES]);
     score_only.0[0] = 1.0;
 
-    println!("\n{:<20} {:>10} {:>10}", "feature", "hand set", "fitted");
+    println!("\n{:<20} {:>10} {:>10}", "feature", "current", "fitted");
     for i in 0..N_FEATURES {
         println!(
             "{:<20} {:>10.3} {:>10.3}",
@@ -157,7 +159,8 @@ fn main() {
     println!("\nR^2 against final margin{:>14}{:>10}", "train", "holdout");
     for (name, w) in [
         ("score only", score_only),
-        ("hand set", start),
+        ("hand set", Weights::hand_set()),
+        ("current", start),
         ("fitted", fitted),
     ] {
         println!(
