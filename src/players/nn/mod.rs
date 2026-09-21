@@ -475,7 +475,11 @@ fn pb_to_array(pb: &PlayerBoard) -> BoardVector {
             pb.floor.total().min(7) as f32 / 7.0,
             pb.first_player_tile as u8 as f32,
             pb.score as f32 / 100.0,
-            pb.predicted_score as f32 / SCORE_SCALE,
+            // predicted_eval, not predicted_score: the latter saturates at
+            // zero, so every board that is underwater encodes identically and
+            // the network cannot tell a slight deficit from a disastrous one.
+            // Master added the unclamped variant for exactly that reason.
+            f32::from(pb.predicted_eval) / SCORE_SCALE,
         ])
         .enumerate()
     {
@@ -898,7 +902,7 @@ mod test {
             );
             assert_eq!(
                 mine,
-                f32::from(gs.boards()[player].predicted_score) / 100.0,
+                f32::from(gs.boards()[player].predicted_eval) / 100.0,
                 "seat {player}: the acting player's board is not first"
             );
         }
