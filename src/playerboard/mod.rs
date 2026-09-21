@@ -51,8 +51,18 @@ pub struct PlayerBoard {
     pub rows: [Row; 5],
     /// Score
     pub score: u8,
-    /// Predicted score if rows were moved to wall
+    /// Predicted score if rows were moved to wall, floored at zero the way
+    /// real end of round scoring is
     pub predicted_score: u8,
+    /// The same prediction, allowed to go negative.
+    ///
+    /// Saturating at zero is right at a real round end, but wrong at a search
+    /// leaf: a penalty that clamps away here may still be paid off by lines
+    /// that complete later in the round. Saturating hides that, so every move
+    /// whose total lands below zero evaluates identically and the search loses
+    /// its ordering. Evaluators read this, everything that reports a score
+    /// reads `predicted_score`.
+    pub predicted_eval: i16,
 }
 
 impl PlayerBoard {
@@ -145,14 +155,11 @@ impl PlayerBoard {
                 }
             }
         }
-        self.predicted_score = self.score + score + wall.score();
+        let total = i16::from(self.score) + i16::from(score) + i16::from(wall.score());
         // cap the score depending on floor
-        let floor_score = floor_score(&self.floor, self.first_player_tile);
-        if self.predicted_score < floor_score {
-            self.predicted_score = 0;
-        } else {
-            self.predicted_score -= floor_score;
-        }
+        let floor_score = i16::from(floor_score(&self.floor, self.first_player_tile));
+        self.predicted_eval = total - floor_score;
+        self.predicted_score = self.predicted_eval.clamp(0, i16::from(u8::MAX)) as u8;
         self.predicted_score
     }
 

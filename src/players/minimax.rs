@@ -41,58 +41,195 @@ impl minimaxer::Evaluate<gamestate::Gamestate<2, 6>> for ScoreEvaluator {
     }
 }
 
+/// Fixed basis for the centre weighting feature. Tuning scales this whole
+/// table by one scalar rather than moving 25 numbers independently.
+const CENTRE_WEIGHTS: [[f32; 5]; 5] = [
+    [0.9, 0.95, 0.97, 0.95, 0.9],
+    [0.95, 0.97, 1.0, 0.97, 0.95],
+    [0.9, 0.95, 0.97, 0.95, 0.9],
+    [0.85, 0.9, 0.95, 0.9, 0.85],
+    [0.8, 0.85, 0.9, 0.85, 0.8],
+];
+
+/// Number of terms in the evaluation feature vector.
+pub const N_FEATURES: usize = 7;
+
+/// Index of the first forecast bucket. The four buckets hold lines needing one
+/// more tile through lines needing four.
+const FORECAST_BASE: usize = 3;
+
+pub const FEATURE_NAMES: [&str; N_FEATURES] = [
+    "score",
+    "first_player",
+    "centre",
+    "forecast_missing_1",
+    "forecast_missing_2",
+    "forecast_missing_3",
+    "forecast_missing_4",
+];
+
+/// Differential feature vector for a position, player 0 minus player 1.
+///
+/// Every term is a lead rather than a standing, because negamax negates the
+/// evaluation wholesale for the minimising player. The evaluation itself is the
+/// dot product of this with a weight vector, which keeps it linear in its
+/// parameters and so fittable by least squares.
+pub fn features(g: &gamestate::Gamestate<2, 6>) -> [f32; N_FEATURES] {
+    features_with(g, true, true)
+}
+
+/// As [`features`], but skipping terms whose weights are zero.
+///
+/// Zeroing a weight leaves its work in place, which is invisible at fixed depth
+/// and wrong at fixed time: an ablation has to charge a term for the nodes it
+/// costs, not just neutralise its output.
+pub fn features_with(
+    g: &gamestate::Gamestate<2, 6>,
+    centre: bool,
+    forecast: bool,
+) -> [f32; N_FEATURES] {
+    let mut f = [0.0; N_FEATURES];
+    f[0] = g.differential_predicted_score();
+    f[1] = if g.boards()[0].first_player_tile {
+        1.0
+    } else if g.boards()[1].first_player_tile {
+        -1.0
+    } else {
+        0.0
+    };
+
+    // Both remaining terms need the simulated wall, so if neither is wanted
+    // there is nothing left to do.
+    if !centre && !forecast {
+        return f;
+    }
+
+    for (i, board) in g.boards().iter().enumerate() {
+        let sign = if i == 0 { 1.0 } else { -1.0 };
+        // The wall as it will stand once this round's full lines are placed.
+        let mut wall = board.simulate_wall();
+        if centre {
+            for (row, weight) in wall.iter().zip(CENTRE_WEIGHTS.iter()) {
+                for (tile, &w) in row.iter().zip(weight.iter()) {
+                    if tile.is_some() {
+                        f[2] += sign * w;
+                    }
+                }
+            }
+        }
+        if !forecast {
+            continue;
+        }
+
+        // Partially filled lines are the asset carried into the next round, and
+        // nothing else in the evaluation sees them. Credit each with what it
+        // would score once completed, bucketed by how many tiles it still
+        // needs, so tuning can learn the discount curve instead of us guessing
+        // a formula for it.
+        //
+        // Placement is cumulative, as in the TypeScript original: two lines
+        // that would land next to each other each see the other, which is
+        // optimistic but does capture the pairing.
+        for (row_ind, line) in board.row_iter() {
+            let capacity = row_ind.capacity();
+            let count = line.count();
+            if count == 0 || count >= capacity {
+                continue;
+            }
+            let Some(tile) = line.tile() else { continue };
+            let missing = usize::from(capacity - count);
+            let scored = f32::from(wall.place_and_score_tile(row_ind, tile));
+            f[FORECAST_BASE + missing - 1] += sign * scored;
+        }
+    }
+    f
+}
+
+/// Weights applied to [`features`].
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Weights(pub [f32; N_FEATURES]);
+
+impl Default for Weights {
+    /// Score in points, then hand set starting values. The forecast buckets
+    /// mirror what the TypeScript evaluation used at round one; they are a
+    /// starting point for tuning, not a result.
+    fn default() -> Self {
+        Self([1.0, 0.5, 1.0, 0.4, 0.24, 0.17, 0.13])
+    }
+}
+
+impl Weights {
+    /// Rescale so the score term weighs exactly one point.
+    ///
+    /// Only the ratios between weights affect move choice, so this is free, and
+    /// it leaves the evaluation readable in points.
+    pub fn normalised(mut self) -> Self {
+        let score = self.0[0];
+        if score.abs() > f32::EPSILON {
+            for w in &mut self.0 {
+                *w /= score;
+            }
+        }
+        self
+    }
+}
+
 // Evaluate based on score and other heuristics
 #[derive(Debug, Clone)]
 pub struct HeuristicEvaluator {
-    fp_weight: f32,
-    wall_weight: [[f32; 5]; 5], // Weight for each position on the wall
+    weights: Weights,
+    centre: bool,
+    forecast: bool,
 }
 
 impl HeuristicEvaluator {
-    pub fn new_no_wall_weight(fp_weight: f32) -> Self {
+    pub fn new(weights: Weights) -> Self {
         Self {
-            fp_weight,
-            wall_weight: [[0.0; 5]; 5],
+            centre: weights.0[2] != 0.0,
+            forecast: weights.0[FORECAST_BASE..].iter().any(|&w| w != 0.0),
+            weights,
         }
+    }
+
+    pub fn new_no_wall_weight(fp_weight: f32) -> Self {
+        let mut weights = Weights::default();
+        weights.0[1] = fp_weight;
+        weights.0[2] = 0.0;
+        Self::new(weights)
+    }
+
+    /// The term set as it stood before the forecast buckets were added: score,
+    /// first player tile and centre weighting, with the wall term differential
+    /// rather than one sided.
+    ///
+    /// Exists so a before/after on the wall term bug measures only that bug,
+    /// rather than the bug fix and the forecast term summed together.
+    pub fn new_pre_forecast() -> Self {
+        let mut weights = Weights::default();
+        for w in &mut weights.0[FORECAST_BASE..] {
+            *w = 0.0;
+        }
+        Self::new(weights)
+    }
+
+    pub fn weights(&self) -> Weights {
+        self.weights
     }
 }
 
 impl Default for HeuristicEvaluator {
     fn default() -> Self {
-        Self {
-            fp_weight: 0.5,
-            wall_weight: [
-                [0.9, 0.95, 0.97, 0.95, 0.9],
-                [0.95, 0.97, 1.0, 0.97, 0.95],
-                [0.9, 0.95, 0.97, 0.95, 0.9],
-                [0.85, 0.9, 0.95, 0.9, 0.85],
-                [0.8, 0.85, 0.9, 0.85, 0.8],
-            ],
-        }
+        Self::new(Weights::default())
     }
 }
 
 impl minimaxer::Evaluate<gamestate::Gamestate<2, 6>> for HeuristicEvaluator {
     fn evaluate(&mut self, g: &gamestate::Gamestate<2, 6>) -> f32 {
-        // Combine various heuristics to evaluate the game state
-        let mut score = g.differential_predicted_score();
-        // Check who has the first tile marker
-        score += if g.boards()[0].first_player_tile {
-            self.fp_weight
-        } else if g.boards()[1].first_player_tile {
-            -self.fp_weight
-        } else {
-            0.0
-        };
-        let wall = g.boards()[0].simulate_wall();
-        for (row, weight) in wall.iter().zip(self.wall_weight.iter()) {
-            for (tile, &w) in row.iter().zip(weight.iter()) {
-                if tile.is_some() {
-                    score += w;
-                }
-            }
-        }
-        score
+        features_with(g, self.centre, self.forecast)
+            .iter()
+            .zip(self.weights.0.iter())
+            .map(|(x, w)| x * w)
+            .sum()
     }
 }
 
@@ -101,6 +238,15 @@ pub struct Minimaxer<E> {
     pub opts: minimaxer::negamax::SearchOptions,
     pub name: String,
     pub evaluator: E,
+    /// Nodes and plies actually achieved, summed over every move picked.
+    ///
+    /// Under a clock a dearer evaluation buys fewer nodes, and the two sides of
+    /// a match do not give up the same amount. Reporting this alongside the win
+    /// rate is what distinguishes "this term is not worth its cost" from "the
+    /// machine was busy".
+    pub nodes: u64,
+    pub searches: u64,
+    pub depth_total: u64,
 }
 
 impl<E> Minimaxer<E> {
@@ -113,6 +259,9 @@ impl<E> Minimaxer<E> {
             opts,
             name: name.into(),
             evaluator,
+            nodes: 0,
+            searches: 0,
+            depth_total: 0,
         }
     }
 }
@@ -130,6 +279,9 @@ impl<E: Evaluate<gamestate::Gamestate<2, 6>>> Player<2, 6> for Minimaxer<E> {
         );
         let result = n.search();
         debug!("Minimax search result: {:?}", result);
+        self.nodes += u64::from(result.nodes);
+        self.depth_total += u64::from(result.depth);
+        self.searches += 1;
         result.best
     }
 
