@@ -121,6 +121,26 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
         &self.factories
     }
 
+    /// Mutable access to the player boards, for tests only.
+    ///
+    /// Lets a test set up a specific wall or pattern row directly instead of
+    /// searching for a game that happens to reach one.
+    #[cfg(test)]
+    pub(crate) fn boards_mut(&mut self) -> &mut [PlayerBoard; P] {
+        &mut self.boards
+    }
+
+    /// Mutable access to the factories, for tests only.
+    ///
+    /// Tests need to build particular positions and, in the encoder's case,
+    /// permute the factory displays to check the encoding does not notice.
+    /// Everything else goes through [`Self::play_move`], which is why this is
+    /// not part of the public surface.
+    #[cfg(test)]
+    pub(crate) fn factories_mut(&mut self) -> &mut [Option<TileGroup>; F] {
+        &mut self.factories
+    }
+
     /// Get access to centre
     pub fn centre(&self) -> TileGroup {
         self.factories[0].unwrap_or_default()

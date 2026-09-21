@@ -12,7 +12,7 @@ use rand_distr::{Distribution, WeightedIndex};
 use crate::{
     gamestate::{Gamestate, Move},
     players::{
-        nn::{gs_to_array_for, index_to_move},
+        nn::{gs_to_array_ordered, FactoryOrder},
         Player,
     },
 };
@@ -20,8 +20,11 @@ use crate::{
 pub mod pretrain;
 pub mod train;
 
-/// Length of the encoded gamestate produced by [`gs_to_array_for`].
-pub const STATE_SIZE: usize = 150;
+/// Length of the encoded gamestate.
+///
+/// Taken from the encoder rather than restated here, so the network's input
+/// width and the vector it is actually fed cannot drift apart.
+pub const STATE_SIZE: usize = crate::players::nn::ENCODED_SIZE;
 
 /// Size of the action space: every (source, tile, destination) combination.
 pub const ACTION_SIZE: usize = 180;
@@ -53,6 +56,8 @@ pub enum CheckpointError {
     Config(ConfigError),
     Record(RecorderError),
     Io(std::io::Error),
+    /// The checkpoint was trained on a different state encoding.
+    StaleEncoding { found: usize, expected: usize },
 }
 
 impl std::fmt::Display for CheckpointError {
@@ -61,6 +66,12 @@ impl std::fmt::Display for CheckpointError {
             Self::Config(e) => write!(f, "checkpoint config: {e}"),
             Self::Record(e) => write!(f, "checkpoint weights: {e}"),
             Self::Io(e) => write!(f, "checkpoint io: {e}"),
+            Self::StaleEncoding { found, expected } => write!(
+                f,
+                "checkpoint expects a {found} wide state but the encoder now \
+                 produces {expected}; it predates an encoding change and its \
+                 weights cannot be reused"
+            ),
         }
     }
 }
@@ -163,6 +174,17 @@ impl<B: Backend> PPOMoveSelector<B> {
         device: &B::Device,
     ) -> Result<Self, CheckpointError> {
         let config = PPOConfig::load(dir.join(format!("checkpoint_{tag}_config.json")))?;
+        // Catch a stale checkpoint here rather than letting burn panic on a
+        // matmul shape several layers down. Any change to the encoding shifts
+        // STATE_SIZE, and weights trained on the old layout are meaningless
+        // even where the widths happen to agree -- but a width mismatch is at
+        // least detectable, so say so plainly.
+        if config.policy.input_size != STATE_SIZE {
+            return Err(CheckpointError::StaleEncoding {
+                found: config.policy.input_size,
+                expected: STATE_SIZE,
+            });
+        }
         let recorder = DefaultFileRecorder::<FullPrecisionSettings>::default();
         let policy = config.policy.init(device).load_file(
             dir.join(format!("checkpoint_{tag}_policy")),
@@ -196,9 +218,14 @@ impl<B: Backend> PPOMoveSelector<B> {
         &self,
         gamestate: &Gamestate<2, 6>,
         moves: &[Move],
-    ) -> (Vec<f32>, Vec<f32>, Vec<f32>) {
+    ) -> (Vec<f32>, Vec<f32>, Vec<f32>, FactoryOrder) {
+        // The encoder sorts the factory displays into a canonical order, so
+        // the action space is indexed by canonical source. The mask has to be
+        // built through the same ordering, or it would open up actions naming
+        // a different display than the one the network was shown.
+        let order = FactoryOrder::canonical(gamestate);
         // Encode from the acting player's seat, not always seat 0.
-        let state = gs_to_array_for(gamestate, gamestate.current_player() as usize)
+        let state = gs_to_array_ordered(gamestate, gamestate.current_player() as usize, &order)
             .as_slice()
             .to_vec();
         let state_tensor = Tensor::<B, 1>::from_data(state.as_slice(), &self.device);
@@ -208,7 +235,7 @@ impl<B: Backend> PPOMoveSelector<B> {
         // so 0 * -1e8 is 0 rather than NaN.
         let mut mask = vec![-1e8f32; ACTION_SIZE];
         for m in moves {
-            mask[m.to_index()] = 0.0;
+            mask[order.canonical_index(m)] = 0.0;
         }
         let mask_tensor = Tensor::<B, 1>::from_data(mask.as_slice(), &self.device);
 
@@ -216,12 +243,15 @@ impl<B: Backend> PPOMoveSelector<B> {
             .to_data()
             .to_vec::<f32>()
             .unwrap();
-        (state, mask, log_probs)
+        (state, mask, log_probs, order)
     }
 
-    /// Map an index in the action space back to the matching entry of `moves`.
-    fn move_from_index(moves: &[Move], index: usize) -> Move {
-        let (source, tile, destination) = index_to_move(index);
+    /// Map a canonical action index back to the matching entry of `moves`.
+    ///
+    /// `order` must be the one the state was encoded with: the index names a
+    /// canonical display, and only `order` knows which real slot that is.
+    fn move_from_index(order: &FactoryOrder, moves: &[Move], index: usize) -> Move {
+        let (source, tile, destination) = order.real_move_parts(index);
         moves
             .iter()
             .find(|m| {
@@ -235,7 +265,7 @@ impl<B: Backend> PPOMoveSelector<B> {
 
     /// Pick a move by sampling the policy, returning what training needs.
     pub fn pick_move_sampled(&self, gamestate: &Gamestate<2, 6>, moves: &[Move]) -> Pick {
-        let (state, mask, log_probs) = self.policy_log_probs(gamestate, moves);
+        let (state, mask, log_probs, order) = self.policy_log_probs(gamestate, moves);
 
         // Sample only over the legal indices. The additive -1e8 mask alone is
         // not enough: it suppresses an action only while the raw logits stay
@@ -243,7 +273,7 @@ impl<B: Backend> PPOMoveSelector<B> {
         // can outscore the mask and get picked. Restricting the distribution to
         // legal moves makes that structurally impossible, and is cheaper too --
         // a handful of candidates rather than all 180.
-        let legal: Vec<usize> = moves.iter().map(|m| m.to_index()).collect();
+        let legal: Vec<usize> = moves.iter().map(|m| order.canonical_index(m)).collect();
         let probs: Vec<f32> = legal
             .iter()
             .map(|&i| {
@@ -262,7 +292,7 @@ impl<B: Backend> PPOMoveSelector<B> {
         let value = self.value.value(state_tensor).into_scalar().to_f32();
 
         Pick {
-            picked_move: Self::move_from_index(moves, action),
+            picked_move: Self::move_from_index(&order, moves, action),
             log_prob: log_probs[action],
             state,
             mask,
@@ -277,14 +307,14 @@ impl<B: Backend> PPOMoveSelector<B> {
     /// training, but when the agent is being measured it only adds noise and
     /// understates how strong the policy actually is.
     pub fn pick_move_greedy(&self, gamestate: &Gamestate<2, 6>, moves: &[Move]) -> Move {
-        let (_, _, log_probs) = self.policy_log_probs(gamestate, moves);
+        let (_, _, log_probs, order) = self.policy_log_probs(gamestate, moves);
         // Argmax over legal indices only, for the same reason as sampling.
         let action = moves
             .iter()
-            .map(|m| m.to_index())
+            .map(|m| order.canonical_index(m))
             .max_by(|&a, &b| log_probs[a].total_cmp(&log_probs[b]))
             .expect("a player always has at least one legal move");
-        Self::move_from_index(moves, action)
+        Self::move_from_index(&order, moves, action)
     }
 }
 
@@ -431,7 +461,7 @@ mod tests {
         let moves = gs.get_moves();
         assert!(!moves.is_empty());
 
-        let (state, mask, log_probs) = ppo.policy_log_probs(&gs, &moves);
+        let (state, mask, log_probs, order) = ppo.policy_log_probs(&gs, &moves);
         assert_eq!(state.len(), STATE_SIZE);
         assert_eq!(mask.len(), ACTION_SIZE);
         let probs: Vec<f32> = log_probs.iter().map(|l| l.exp()).collect();
@@ -440,7 +470,9 @@ mod tests {
         assert!((total - 1.0).abs() < 1e-4, "probabilities summed to {total}");
 
         // Every legal move holds some probability mass, every illegal slot none.
-        let legal: Vec<usize> = moves.iter().map(|m| m.to_index()).collect();
+        // Legality is in canonical action space, the same space the network
+        // scores; `m.to_index()` would be the wrong set of slots.
+        let legal: Vec<usize> = moves.iter().map(|m| order.canonical_index(m)).collect();
         for (i, &p) in probs.iter().enumerate() {
             if legal.contains(&i) {
                 assert!(p > 0.0, "legal action {i} had zero probability");
@@ -451,5 +483,77 @@ mod tests {
 
         assert!(moves.contains(&ppo.pick_move_greedy(&gs, &moves)));
         assert!(moves.contains(&ppo.pick_move_sampled(&gs, &moves).picked_move));
+    }
+
+    /// End to end check of the factory remapping: shuffling the displays must
+    /// not change which move the agent plays, only which slot names it.
+    ///
+    /// This is the test that would catch a remapping applied in one direction
+    /// but not the other. A mask built in canonical space and decoded in real
+    /// space still yields a legal move every time, so legality alone proves
+    /// nothing -- the agent would simply take the wrong display, forever, in
+    /// silence.
+    #[test]
+    fn the_move_picked_does_not_depend_on_how_the_displays_are_arranged() {
+        use crate::players::nn::FACTORY_SLOTS;
+
+        let device = Default::default();
+        let ppo = PPOMoveSelector::<NdArray>::new(
+            PPOConfig::new(
+                PolicyConfig::new(STATE_SIZE, 32),
+                ValueConfig::new(STATE_SIZE, 32),
+            ),
+            &device,
+        );
+
+        let mut gs = Gamestate::<2, 6>::new_2_player_with_seed(0, 0);
+        for _ in 0..3 {
+            let moves = gs.get_moves();
+            gs.play_move(moves[moves.len() / 2]);
+        }
+
+        let moves = gs.get_moves();
+        let picked = ppo.pick_move_greedy(&gs, &moves);
+        let order = FactoryOrder::canonical(&gs);
+
+        for arrangement in [[5usize, 4, 3, 2, 1], [2, 3, 1, 5, 4], [3, 1, 4, 5, 2]] {
+            let original = *gs.factories();
+            let mut shuffled = gs.clone();
+            for (slot, &from) in arrangement.iter().enumerate() {
+                shuffled.factories_mut()[slot + 1] = original[from];
+            }
+
+            let shuffled_moves = shuffled.get_moves();
+            let shuffled_pick = ppo.pick_move_greedy(&shuffled, &shuffled_moves);
+            assert!(shuffled_moves.contains(&shuffled_pick));
+
+            // Same tiles, same destination, same amount.
+            assert_eq!(shuffled_pick.tile, picked.tile, "{arrangement:?}");
+            assert_eq!(
+                shuffled_pick.destination, picked.destination,
+                "{arrangement:?}"
+            );
+            assert_eq!(shuffled_pick.count, picked.count, "{arrangement:?}");
+
+            // And taken from the slot now holding what the original slot held.
+            let shuffled_order = FactoryOrder::canonical(&shuffled);
+            assert_eq!(
+                shuffled_order.canonical_index(&shuffled_pick),
+                order.canonical_index(&picked),
+                "{arrangement:?}: picked a different canonical action"
+            );
+            assert_eq!(
+                shuffled.factories()[usize::from(shuffled_pick.source)],
+                gs.factories()[usize::from(picked.source)],
+                "{arrangement:?}: took from a display holding different tiles"
+            );
+        }
+
+        // The position has to be one where the arrangement could matter.
+        let slots: Vec<_> = (1..FACTORY_SLOTS).map(|s| gs.factories()[s]).collect();
+        assert!(
+            slots.iter().any(|f| *f != slots[0]),
+            "displays are all alike, the test proves nothing"
+        );
     }
 }

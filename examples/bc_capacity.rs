@@ -22,7 +22,7 @@ fn main() {
             &device,
         );
         let t0 = std::time::Instant::now();
-        let trained = behaviour_clone(ppo, &data, epochs, 256, 0.001, &device);
+        let trained = behaviour_clone(ppo, data.view(), epochs, 256, 0.001, &device);
         let dir = std::path::PathBuf::from(format!("/tmp/bccap_{hidden}_{layers}"));
         std::fs::create_dir_all(&dir).unwrap();
         trained.save(&dir, "best").unwrap();

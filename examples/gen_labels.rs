@@ -2,7 +2,7 @@
 //! Args: <max_depth> <games> <out_dir> [chunk]
 use azul_tiles_rs::gamestate::{Gamestate, Move, State};
 use azul_tiles_rs::players::minimax::ScoreEvaluator;
-use azul_tiles_rs::players::nn::gs_to_array_for;
+use azul_tiles_rs::players::nn::{gs_to_array_ordered, FactoryOrder};
 use azul_tiles_rs::players::ppo::pretrain::{MultiDataset, Replay};
 use azul_tiles_rs::players::ppo::ACTION_SIZE;
 use minimaxer::negamax::{Negamax, SearchOptions};
@@ -22,10 +22,14 @@ fn opts(depth: u8) -> SearchOptions {
     }
 }
 
-fn mask_for(moves: &[Move]) -> Vec<f32> {
+/// Mask in *canonical* action space -- the space the policy is indexed by.
+///
+/// Must use the same `FactoryOrder` as the state encoding, or the mask and the
+/// label name different displays than the state shows, and nothing reports it.
+fn mask_for(moves: &[Move], order: &FactoryOrder) -> Vec<f32> {
     let mut m = vec![-1e8f32; ACTION_SIZE];
     for mv in moves {
-        m[mv.to_index()] = 0.0;
+        m[order.canonical_index(mv)] = 0.0;
     }
     m
 }
@@ -62,8 +66,12 @@ fn main() {
                 loop {
                     let moves = gs.get_moves();
                     let seat = gs.current_player() as usize;
-                    d.states.extend_from_slice(gs_to_array_for(&gs, seat).as_slice());
-                    d.masks.extend_from_slice(&mask_for(&moves));
+                    // One order per position, shared by the state, the mask
+                    // and every label below.
+                    let order = FactoryOrder::canonical(&gs);
+                    d.states
+                        .extend_from_slice(gs_to_array_ordered(&gs, seat, &order).as_slice());
+                    d.masks.extend_from_slice(&mask_for(&moves, &order));
 
                     // One search per depth. The deepest dominates the cost, so
                     // the shallower labels are nearly free.
@@ -72,7 +80,7 @@ fn main() {
                         let mut n =
                             Negamax::new(Node::new(gs.clone()), ScoreEvaluator, opts(depth));
                         let r = n.search();
-                        d.targets[i].push(r.best.to_index() as i32);
+                        d.targets[i].push(order.canonical_index(&r.best) as i32);
                         d.values[i].push(r.value);
                         deepest = r.best;
                     }
@@ -82,6 +90,9 @@ fn main() {
                     } else {
                         deepest
                     };
+                    // Replay indices stay in REAL action space: they are
+                    // decoded back into moves to rebuild positions, and the
+                    // canonical order is a property of a position, not a move.
                     played_idx.push(played.to_index() as i32);
                     let s = gs.play_move(played);
                     if s == State::RoundEnd && gs.end_round() == State::GameEnd {

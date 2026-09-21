@@ -22,7 +22,7 @@ fn main() {
 
     let multi = MultiDataset::load_dir(&dir, "shard_").expect("labels");
     let di = multi.depths.iter().position(|&x| x == depth).expect("depth present");
-    let data = multi.for_depth(depth).unwrap();
+    let data = multi.view_depth(depth).unwrap();
     println!("{} positions, depths {:?}, training on depth {depth}", data.len(), multi.depths);
 
     let device = Default::default();
@@ -34,8 +34,8 @@ fn main() {
 
     let t0 = std::time::Instant::now();
     let ppo = PPOMoveSelector::<B>::new(PPOConfig::default(), &device);
-    let ppo = behaviour_clone(ppo, &data, pe, 256, 0.001, &device);
-    let ppo = pretrain_value(ppo, &data, &multi.values[di], ve, 256, 0.001, &device);
+    let ppo = behaviour_clone(ppo, data, pe, 256, 0.001, &device);
+    let ppo = pretrain_value(ppo, data, &multi.values[di], ve, 256, 0.001, &device);
 
     std::fs::create_dir_all(&out).unwrap();
     ppo.save(&out, "best").unwrap();

@@ -11,6 +11,9 @@ use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::cast::ToElement as _;
 use burn::tensor::{Int, Tensor, TensorData};
 
+use crate::gamestate::{Gamestate, Move};
+use crate::players::nn::{gs_to_array_ordered, FactoryOrder};
+
 use super::{PPOMoveSelector, ACTION_SIZE, STATE_SIZE};
 
 /// Positions labelled with the move a teacher chose.
@@ -69,10 +72,40 @@ impl Dataset {
         Ok(Self { states, masks, targets })
     }
 
+    /// Append a pre-encoded position.
+    ///
+    /// `mask` and `target` must be in *canonical* action space, the space the
+    /// policy is indexed by. Prefer [`Self::push_position`], which cannot get
+    /// that wrong.
     pub fn push(&mut self, state: &[f32], mask: &[f32], target: usize) {
         self.states.extend_from_slice(state);
         self.masks.extend_from_slice(mask);
         self.targets.push(target as i32);
+    }
+
+    /// Encode a position and label it with the move the teacher chose.
+    ///
+    /// The encoder sorts the factory displays into a canonical order, so a
+    /// move's action index is not `Move::to_index` -- it is that index with
+    /// the source remapped through [`FactoryOrder`]. Labelling a dataset with
+    /// the raw index would train the policy to name a display by its original
+    /// slot while being shown the sorted one, and nothing downstream would
+    /// complain; it would simply never learn. Encoding here, once, removes the
+    /// chance of the two disagreeing.
+    ///
+    /// `moves` are the legal moves in `gs`, and `chosen` must be one of them.
+    pub fn push_position(&mut self, gs: &Gamestate<2, 6>, moves: &[Move], chosen: &Move) {
+        let order = FactoryOrder::canonical(gs);
+        let state = gs_to_array_ordered(gs, gs.current_player() as usize, &order);
+
+        let mut mask = [-1e8f32; ACTION_SIZE];
+        for m in moves {
+            mask[order.canonical_index(m)] = 0.0;
+        }
+
+        let target = order.canonical_index(chosen);
+        debug_assert_eq!(mask[target], 0.0, "the teacher's move was not legal");
+        self.push(state.as_slice(), &mask, target);
     }
 }
 
@@ -159,6 +192,34 @@ impl Replay {
             out.played.extend(r.played);
         }
         Ok(out)
+    }
+}
+
+/// A borrowed view of labelled positions, for training without copying.
+#[derive(Clone, Copy, Debug)]
+pub struct DataView<'a> {
+    pub states: &'a [f32],
+    pub masks: &'a [f32],
+    pub targets: &'a [i32],
+}
+
+impl DataView<'_> {
+    pub fn len(&self) -> usize {
+        self.targets.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.targets.is_empty()
+    }
+}
+
+impl Dataset {
+    pub fn view(&self) -> DataView<'_> {
+        DataView {
+            states: &self.states,
+            masks: &self.masks,
+            targets: &self.targets,
+        }
     }
 }
 
@@ -277,13 +338,17 @@ impl MultiDataset {
         Ok(out)
     }
 
-    /// The single-depth view the policy trainer expects.
-    pub fn for_depth(&self, depth: u8) -> Option<Dataset> {
+    /// Borrow the labels for one depth.
+    ///
+    /// A view, not a copy: at 2.1M positions the states and masks are several
+    /// gigabytes, and cloning them to select a depth doubled peak memory --
+    /// enough, alongside a training run, to lose the training run.
+    pub fn view_depth(&self, depth: u8) -> Option<DataView<'_>> {
         let d = self.depths.iter().position(|&x| x == depth)?;
-        Some(Dataset {
-            states: self.states.clone(),
-            masks: self.masks.clone(),
-            targets: self.targets[d].clone(),
+        Some(DataView {
+            states: &self.states,
+            masks: &self.masks,
+            targets: &self.targets[d],
         })
     }
 }
@@ -300,7 +365,7 @@ impl MultiDataset {
 /// /10 the reward uses, so the magnitudes are at least comparable.
 pub fn pretrain_value<B: AutodiffBackend>(
     mut ppo: PPOMoveSelector<B>,
-    data: &Dataset,
+    data: DataView<'_>,
     values: &[f32],
     epochs: usize,
     batch_size: usize,
@@ -387,7 +452,7 @@ pub fn pretrain_value<B: AutodiffBackend>(
 /// which is the part that needs it.
 pub fn behaviour_clone<B: AutodiffBackend>(
     mut ppo: PPOMoveSelector<B>,
-    data: &Dataset,
+    data: DataView<'_>,
     epochs: usize,
     batch_size: usize,
     learning_rate: f64,
@@ -484,4 +549,46 @@ pub fn behaviour_clone<B: AutodiffBackend>(
         );
     }
     ppo
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A dataset row has to line up with what the policy is indexed by: the
+    /// label must be a legal slot in its own mask, and both must be in the
+    /// canonical action space the state was encoded in.
+    #[test]
+    fn a_pushed_position_labels_a_legal_canonical_action() {
+        let mut gs = Gamestate::<2, 6>::new_2_player_with_seed(0, 0);
+        let mut data = Dataset::default();
+        let mut rows = 0;
+
+        for ply in 0..30 {
+            let moves = gs.get_moves();
+            if moves.is_empty() {
+                break;
+            }
+            let chosen = moves[ply % moves.len()];
+            data.push_position(&gs, &moves, &chosen);
+            rows += 1;
+
+            let target = data.targets[rows - 1] as usize;
+            let mask = &data.masks[(rows - 1) * ACTION_SIZE..rows * ACTION_SIZE];
+            assert_eq!(mask[target], 0.0, "ply {ply}: label is masked out");
+            assert_eq!(
+                mask.iter().filter(|&&m| m == 0.0).count(),
+                moves.len(),
+                "ply {ply}: mask opens a different number of slots than there \
+                 are legal moves, so two moves collided"
+            );
+
+            // The state is the acting player's view, at the declared width.
+            assert_eq!(data.states.len(), rows * STATE_SIZE);
+
+            gs.play_move(chosen);
+        }
+
+        assert!(rows > 5, "only {rows} rows, test proves little");
+    }
 }
