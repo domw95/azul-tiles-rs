@@ -2,8 +2,44 @@
 use azul_tiles_rs::players::ppo::pretrain::MultiDataset;
 use azul_tiles_rs::players::ppo::{ACTION_SIZE, STATE_SIZE};
 
+/// Check each shard's byte size against the count in its own header, before
+/// spending minutes loading gigabytes.
+///
+/// A shard whose generator was killed part way through still has a plausible
+/// header and still loads -- `load_shard` slices only what the header asks
+/// for -- so a truncated or over-long file is silent until the numbers come
+/// out strange. The layout is: n:u64, nd:u8, depths:[u8; nd], then n states,
+/// n masks, then per depth n targets and n values.
+fn check_shard_sizes(dir: &std::path::Path) -> std::io::Result<()> {
+    let mut paths: Vec<_> = std::fs::read_dir(dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("shard_")))
+        .collect();
+    paths.sort();
+    let mut bad = 0;
+    for p in &paths {
+        let mut head = [0u8; 9];
+        let f = std::fs::File::open(p)?;
+        std::io::Read::read_exact(&mut &f, &mut head)?;
+        let n = u64::from_le_bytes(head[0..8].try_into().unwrap()) as usize;
+        let nd = head[8] as usize;
+        let expect = 9 + nd + n * (STATE_SIZE * 4 + ACTION_SIZE * 4 + nd * 8);
+        let actual = f.metadata()?.len() as usize;
+        if actual != expect {
+            println!(
+                "  {}: header says {n} positions at {nd} depths, so {expect} bytes, but the file is {actual}",
+                p.file_name().unwrap().to_string_lossy()
+            );
+            bad += 1;
+        }
+    }
+    println!("{} shards, {bad} with a size that disagrees with its header", paths.len());
+    Ok(())
+}
+
 fn main() {
     let dir = std::env::args().nth(1).unwrap();
+    check_shard_sizes(std::path::Path::new(&dir)).expect("shard sizes");
     let d = MultiDataset::load_dir(std::path::Path::new(&dir), "shard_").expect("load");
     let n = d.len();
     println!("positions {n}, depths {:?}", d.depths);
