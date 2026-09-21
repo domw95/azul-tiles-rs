@@ -158,15 +158,13 @@ fn main() {
         std::fs::File::open("eval_weights.json").expect("run the tune binary first"),
     )
     .unwrap();
-    let hand_set = Weights::default();
+    // The default has the forecast term off, so it is the cheap side of the
+    // ablation. HeuristicEvaluator::new sees the zeros and skips the work, so
+    // this really is the cheaper evaluator and not just a muted one.
+    let no_forecast = Weights::default();
+    let forecast_on = no_forecast.with_ts_forecast();
     let mut score_only = Weights([0.0; N_FEATURES]);
     score_only.0[0] = 1.0;
-    // Forecast buckets off. HeuristicEvaluator::new sees the zeros and skips
-    // the work, so this really is the cheaper evaluator, not just a muted one.
-    let mut no_forecast = hand_set;
-    for w in &mut no_forecast.0[3..] {
-        *w = 0.0;
-    }
 
     if time_ms > 0 {
         println!("{time_ms}ms per move, {} games per matchup\n", pairs * 4);
@@ -179,13 +177,13 @@ fn main() {
     // biasing a comparison between evaluators of different cost, because it is
     // symmetric by construction and that comparison is not: see the nodes/move
     // ratio for that.
-    matchup("null control", hand_set, hand_set, pairs, budget);
-    matchup("forecast on vs off", hand_set, no_forecast, pairs, budget);
+    matchup("null control", no_forecast, no_forecast, pairs, budget);
+    matchup("forecast on vs off", forecast_on, no_forecast, pairs, budget);
     if time_ms > 0 {
         return;
     }
     matchup("no forecast vs score only", no_forecast, score_only, pairs, budget);
     matchup("fitted vs score only", fitted, score_only, pairs, budget);
-    matchup("fitted vs hand set", fitted, hand_set, pairs, budget);
-    matchup("hand set vs score only", hand_set, score_only, pairs, budget);
+    matchup("fitted vs default", fitted, no_forecast, pairs, budget);
+    matchup("forecast on vs score only", forecast_on, score_only, pairs, budget);
 }

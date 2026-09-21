@@ -150,15 +150,35 @@ pub fn features_with(
 pub struct Weights(pub [f32; N_FEATURES]);
 
 impl Default for Weights {
-    /// Score in points, then hand set starting values. The forecast buckets
-    /// mirror what the TypeScript evaluation used at round one; they are a
-    /// starting point for tuning, not a result.
+    /// Score in points, then hand set values for the first player tile and the
+    /// centre weighting.
+    ///
+    /// The forecast buckets are zero deliberately. The term measured at 49.1%
+    /// +/- 2.4 over 1600 games against the same evaluator without it, so it
+    /// buys nothing, and at zero weight [`HeuristicEvaluator::new`] skips the
+    /// work rather than merely muting it. Use [`Weights::with_ts_forecast`] to
+    /// switch it back on for an ablation or a retune.
     fn default() -> Self {
-        Self([1.0, 0.5, 1.0, 0.4, 0.24, 0.17, 0.13])
+        Self([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
     }
 }
 
 impl Weights {
+    /// The forecast bucket values implied by the TypeScript evaluation at round
+    /// one, which is where the ported term started.
+    ///
+    /// Kept so the term can be switched on without rediscovering the numbers,
+    /// not because they are good: least squares on 15,000 round end positions
+    /// preferred 0.307, 0.106, -0.117, -0.295, and neither set beat leaving the
+    /// term off.
+    pub const TS_FORECAST: [f32; 4] = [0.4, 0.24, 0.17, 0.13];
+
+    /// Turn the forecast term on with its original hand set values.
+    pub fn with_ts_forecast(mut self) -> Self {
+        self.0[FORECAST_BASE..].copy_from_slice(&Self::TS_FORECAST);
+        self
+    }
+
     /// Rescale so the score term weighs exactly one point.
     ///
     /// Only the ratios between weights affect move choice, so this is free, and
@@ -202,14 +222,11 @@ impl HeuristicEvaluator {
     /// first player tile and centre weighting, with the wall term differential
     /// rather than one sided.
     ///
-    /// Exists so a before/after on the wall term bug measures only that bug,
-    /// rather than the bug fix and the forecast term summed together.
+    /// Identical to [`Default`] now that the forecast term defaults off, but
+    /// named so a before/after on the wall term bug says what it is measuring
+    /// and keeps saying it if the default ever changes again.
     pub fn new_pre_forecast() -> Self {
-        let mut weights = Weights::default();
-        for w in &mut weights.0[FORECAST_BASE..] {
-            *w = 0.0;
-        }
-        Self::new(weights)
+        Self::new(Weights::default())
     }
 
     pub fn weights(&self) -> Weights {
