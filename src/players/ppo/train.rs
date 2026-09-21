@@ -1,4 +1,5 @@
 use std::path::PathBuf;
+use std::time::Duration;
 
 use burn::nn::loss::{HuberLoss, Reduction};
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
@@ -39,6 +40,12 @@ pub struct StopCondition {
     pub min_episodes: usize,
     /// Hard cap, so a run that never converges still terminates.
     pub max_episodes: usize,
+    /// Wall-clock cap.
+    ///
+    /// Episode cost scales with network size, so a fixed episode budget hands
+    /// small networks far more compute than large ones. Comparing
+    /// architectures fairly means equalising time, not episodes.
+    pub max_duration: Option<Duration>,
     /// EMA weight applied to the eval margin, in (0, 1]. Lower is smoother.
     ///
     /// Patience runs off the smoothed value, not the raw one: a single good
@@ -58,6 +65,7 @@ impl Default for StopCondition {
             patience: 400,
             min_episodes: 600,
             max_episodes: 4000,
+            max_duration: None,
             smoothing: 0.2,
         }
     }
@@ -68,6 +76,8 @@ impl Default for StopCondition {
 pub enum StopReason {
     /// Reached the target win rate.
     TargetReached,
+    /// Ran out of wall-clock budget.
+    OutOfTime,
     /// No improvement for `patience` episodes.
     Plateaued,
     /// Hit `max_episodes`.
@@ -135,13 +145,44 @@ pub struct TrainOptions {
     pub epochs: usize,
     pub batch_size: usize,
     pub games_per_episode: usize,
-    /// Greedy games played each episode to measure progress.
+    /// Greedy games played per evaluation.
     pub eval_games: usize,
+    /// Evaluate every N episodes.
+    ///
+    /// Evaluation is pure overhead for the stopping rule, and at the default
+    /// it costs as many games as training itself. Evaluating less often buys
+    /// most of that compute back for actual learning; the cost is coarser
+    /// granularity on best-checkpoint selection.
+    pub eval_every: usize,
     /// Discount applied to future rewards.
     pub gamma: f32,
     /// PPO clip range.
     pub epsilon: f32,
     pub learning_rate: f64,
+    /// Multiply the learning rate by this every [`Self::lr_decay_every`]
+    /// episodes. 1.0 disables decay.
+    ///
+    /// A flat rate held for thousands of episodes lets a converged policy
+    /// keep taking full-size steps, which is how a run that peaked at avg
+    /// margin -19.7 slid to -24.9 over the following 400 episodes.
+    ///
+    /// Decay is geometric in episode count rather than a fraction of the run
+    /// because runs here are capped on wall-clock, so the total episode count
+    /// is not known up front.
+    pub lr_decay: f64,
+    /// Episodes between applications of [`Self::lr_decay`].
+    pub lr_decay_every: usize,
+    /// Offset added to the episode index when computing the decayed rate.
+    ///
+    /// For resuming: a continued run must pick the schedule up where it left
+    /// off, not restart at the full rate and undo the converged policy.
+    pub lr_start_episode: usize,
+    /// Clip gradients to this L2 norm. `None` disables clipping.
+    ///
+    /// Three long runs diverged far enough for the policy logits to exceed the
+    /// masking constant and start selecting illegal moves, so this is not a
+    /// theoretical concern here.
+    pub grad_clip_norm: Option<f32>,
     /// Weight of the entropy bonus in the policy loss.
     pub entropy_coeff: f32,
     /// Reward added at the end of a game for winning, subtracted for losing.
@@ -184,9 +225,14 @@ impl Default for TrainOptions {
             batch_size: 128,
             games_per_episode: 40,
             eval_games: 40,
+            eval_every: 1,
             gamma: 0.99,
             epsilon: 0.1,
             learning_rate: 0.001,
+            lr_decay: 1.0,
+            lr_decay_every: 500,
+            lr_start_episode: 0,
+            grad_clip_norm: Some(0.5),
             entropy_coeff: 0.01,
             terminal_reward: 1.0,
             // Measured, not assumed. A 2x2 over these two at a fixed
@@ -282,8 +328,13 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
     /// so the saved model is the best one seen rather than whichever happened
     /// to be current when the run stopped.
     pub fn train(self) -> (PPOMoveSelector<B>, TrainSummary) {
-        let mut policy_optimiser = AdamConfig::new().init();
-        let mut critic_optimiser = AdamConfig::new().init();
+        let adam = || match self.options.grad_clip_norm {
+            Some(norm) => AdamConfig::new()
+                .with_grad_clipping(Some(burn::grad_clipping::GradientClippingConfig::Norm(norm))),
+            None => AdamConfig::new(),
+        };
+        let mut policy_optimiser = adam().init();
+        let mut critic_optimiser = adam().init();
 
         let mut ppo = self.ppo;
         let opponent = self.opponent;
@@ -303,6 +354,7 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
         let mut smoothed: Option<f32> = None;
         let mut best_smoothed = f32::NEG_INFINITY;
         let mut best_smoothed_episode = 0;
+        let started = std::time::Instant::now();
         let mut episodes_run = 0;
         let mut last_ev = f32::NAN;
         let mut reason = StopReason::BudgetExhausted;
@@ -345,6 +397,16 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             let ev = explained_variance(&data.returns, &data.advantages);
             data.normalise_advantages();
 
+            // Decayed rate for this episode.
+            let lr = if options.lr_decay == 1.0 {
+                options.learning_rate
+            } else {
+                options.learning_rate
+                    * options
+                        .lr_decay
+                        .powi(((episode + options.lr_start_episode) / options.lr_decay_every) as i32)
+            };
+
             let mut order: Vec<usize> = (0..data.len()).collect();
             for _ in 0..options.epochs {
                 if options.shuffle_minibatches {
@@ -356,17 +418,13 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
 
                     let policy_grad = policy_loss.backward();
                     let gradient_params = GradientsParams::from_grads(policy_grad, &ppo.policy);
-                    let policy =
-                        policy_optimiser.step(options.learning_rate, ppo.policy, gradient_params);
+                    let policy = policy_optimiser.step(lr, ppo.policy, gradient_params);
 
                     let critic_grad = critic_loss.backward();
                     let critic_gradient_params =
                         GradientsParams::from_grads(critic_grad, &ppo.value);
-                    let critic = critic_optimiser.step(
-                        options.learning_rate * options.critic_lr_multiplier,
-                        ppo.value,
-                        critic_gradient_params,
-                    );
+                    let critic =
+                        critic_optimiser.step(lr * options.critic_lr_multiplier, ppo.value, critic_gradient_params);
 
                     ppo = PPOMoveSelector {
                         device: device.clone(),
@@ -375,6 +433,15 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                         value: critic,
                     };
                 }
+            }
+
+            // Time is checked every episode, not just on evaluation ones.
+            let out_of_time = options
+                .stop
+                .max_duration
+                .is_some_and(|limit| started.elapsed() >= limit);
+            if episode % options.eval_every != 0 && !out_of_time {
+                continue;
             }
 
             // Measure the greedy policy on held-out deals: that, not the
@@ -395,7 +462,7 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             smoothed = Some(smooth);
 
             println!(
-                "episode {episode}: {} states | ev {ev:+.2} | eval win {:.0}% margin {:+.1} (avg {:+.1}) score {:.1}",
+                "episode {episode}: {} states | lr {lr:.2e} | ev {ev:+.2} | eval win {:.0}% margin {:+.1} (avg {:+.1}) score {:.1}",
                 data.len(),
                 100.0 * eval.win_rate,
                 eval.margin,
@@ -416,6 +483,10 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
 
             if eval.win_rate >= options.stop.target_win_rate {
                 reason = StopReason::TargetReached;
+                break;
+            }
+            if out_of_time {
+                reason = StopReason::OutOfTime;
                 break;
             }
             if episode >= options.stop.min_episodes
@@ -647,6 +718,30 @@ fn returns(rewards: &[f32], gamma: f32) -> Vec<f32> {
     out
 }
 
+/// TODO: batch the rollout across games.
+///
+/// Every game currently steps independently, so a policy forward pass is one
+/// row: roughly 2,800 separate 150xH matvecs per episode, for the policy and
+/// the critic. Stepping all `games` in lockstep instead -- gather the states
+/// of every game waiting on the agent, run one [batch, STATE_SIZE] forward,
+/// scatter the moves back -- collapses that to about 70 batched passes.
+///
+/// Worth doing for three reasons:
+///   - It is a large win on CPU on its own, which is where we run today.
+///   - `pick_move_sampled` calls `.to_data().to_vec()` once per move to sample
+///     an action. On CPU that is cheap; on any accelerator it is a
+///     device-to-host sync every ply, and batching removes most of them.
+///   - It is the prerequisite for a GPU being worth anything here. Batch-1
+///     matvecs are dominated by kernel launch overhead, so as written a GPU
+///     would likely be slower than the CPU.
+///
+/// Games have different lengths and only some are waiting on the agent at any
+/// moment, so this needs a step-until-agent-turn loop over a vec of live games
+/// rather than a simple map.
+///
+/// Note this is separate from the cost of the simulation and of the minimax
+/// opponent, which are CPU-bound whatever happens to the tensor work.
+///
 /// Play `games` games spread across the thread pool.
 ///
 /// Games are independent and seeded, so this is a straight fan-out. The agent

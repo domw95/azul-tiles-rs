@@ -17,6 +17,7 @@ use crate::{
     },
 };
 
+pub mod pretrain;
 pub mod train;
 
 /// Length of the encoded gamestate produced by [`gs_to_array_for`].
@@ -236,11 +237,26 @@ impl<B: Backend> PPOMoveSelector<B> {
     pub fn pick_move_sampled(&self, gamestate: &Gamestate<2, 6>, moves: &[Move]) -> Pick {
         let (state, mask, log_probs) = self.policy_log_probs(gamestate, moves);
 
-        // Sample rather than take the best, so that training keeps exploring
-        let probs: Vec<f32> = log_probs.iter().map(|l| l.exp()).collect();
-        let action = WeightedIndex::new(&probs)
-            .unwrap()
-            .sample(&mut rand::thread_rng());
+        // Sample only over the legal indices. The additive -1e8 mask alone is
+        // not enough: it suppresses an action only while the raw logits stay
+        // well under 1e8, so once the network starts diverging an illegal move
+        // can outscore the mask and get picked. Restricting the distribution to
+        // legal moves makes that structurally impossible, and is cheaper too --
+        // a handful of candidates rather than all 180.
+        let legal: Vec<usize> = moves.iter().map(|m| m.to_index()).collect();
+        let probs: Vec<f32> = legal
+            .iter()
+            .map(|&i| {
+                let p = log_probs[i].exp();
+                if p.is_finite() { p } else { 0.0 }
+            })
+            .collect();
+        // If every legal move underflowed, or the network produced garbage,
+        // fall back to uniform rather than taking the whole run down.
+        let action = match WeightedIndex::new(&probs) {
+            Ok(dist) => legal[dist.sample(&mut rand::thread_rng())],
+            Err(_) => legal[rand::random::<usize>() % legal.len()],
+        };
 
         let state_tensor = Tensor::<B, 1>::from_data(state.as_slice(), &self.device);
         let value = self.value.value(state_tensor).into_scalar().to_f32();
@@ -262,12 +278,12 @@ impl<B: Backend> PPOMoveSelector<B> {
     /// understates how strong the policy actually is.
     pub fn pick_move_greedy(&self, gamestate: &Gamestate<2, 6>, moves: &[Move]) -> Move {
         let (_, _, log_probs) = self.policy_log_probs(gamestate, moves);
-        let action = log_probs
+        // Argmax over legal indices only, for the same reason as sampling.
+        let action = moves
             .iter()
-            .enumerate()
-            .max_by(|(_, a), (_, b)| a.total_cmp(b))
-            .map(|(i, _)| i)
-            .expect("action space is never empty");
+            .map(|m| m.to_index())
+            .max_by(|&a, &b| log_probs[a].total_cmp(&log_probs[b]))
+            .expect("a player always has at least one legal move");
         Self::move_from_index(moves, action)
     }
 }
@@ -305,18 +321,23 @@ impl<B: Backend> Player<2, 6> for PPOMoveSelector<B> {
 pub struct PolicyConfig {
     pub input_size: usize,
     pub hidden_size: usize,
+    /// Number of hidden_size -> hidden_size layers after the input layer.
+    ///
+    /// Defaults to 1, which is the two-hidden-layer network everything before
+    /// this was trained with; the default also keeps older checkpoints, whose
+    /// config JSON has no such field, loadable.
+    #[config(default = 1)]
+    pub hidden_layers: usize,
 }
 
 impl PolicyConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> Policy<B> {
-        let input = LinearConfig::new(self.input_size, self.hidden_size).init(device);
-        let hidden = LinearConfig::new(self.hidden_size, self.hidden_size).init(device);
-        let output = LinearConfig::new(self.hidden_size, ACTION_SIZE).init(device);
-
         Policy {
-            input,
-            hidden,
-            output,
+            input: LinearConfig::new(self.input_size, self.hidden_size).init(device),
+            hidden: (0..self.hidden_layers)
+                .map(|_| LinearConfig::new(self.hidden_size, self.hidden_size).init(device))
+                .collect(),
+            output: LinearConfig::new(self.hidden_size, ACTION_SIZE).init(device),
             activation: Relu::new(),
         }
     }
@@ -325,7 +346,7 @@ impl PolicyConfig {
 #[derive(Module, Debug)]
 pub struct Policy<B: Backend> {
     input: Linear<B>,
-    hidden: Linear<B>,
+    hidden: Vec<Linear<B>>,
     output: Linear<B>,
     activation: Relu,
 }
@@ -336,10 +357,10 @@ impl<B: Backend> Policy<B> {
     /// Generic over rank so the same path serves a single state during rollout
     /// and a whole `[batch, STATE_SIZE]` slice during training.
     fn action<const D: usize>(&self, state: Tensor<B, D>) -> Tensor<B, D> {
-        let x = self.input.forward(state);
-        let x = self.activation.forward(x);
-        let x = self.hidden.forward(x);
-        let x = self.activation.forward(x);
+        let mut x = self.activation.forward(self.input.forward(state));
+        for layer in &self.hidden {
+            x = self.activation.forward(layer.forward(x));
+        }
         self.output.forward(x)
     }
 }
@@ -348,18 +369,19 @@ impl<B: Backend> Policy<B> {
 pub struct ValueConfig {
     pub input_size: usize,
     pub hidden_size: usize,
+    /// See [`PolicyConfig::hidden_layers`].
+    #[config(default = 1)]
+    pub hidden_layers: usize,
 }
 
 impl ValueConfig {
     fn init<B: Backend>(&self, device: &B::Device) -> Value<B> {
-        let input = LinearConfig::new(self.input_size, self.hidden_size).init(device);
-        let hidden = LinearConfig::new(self.hidden_size, self.hidden_size).init(device);
-        let output = LinearConfig::new(self.hidden_size, 1).init(device);
-
         Value {
-            input,
-            hidden,
-            output,
+            input: LinearConfig::new(self.input_size, self.hidden_size).init(device),
+            hidden: (0..self.hidden_layers)
+                .map(|_| LinearConfig::new(self.hidden_size, self.hidden_size).init(device))
+                .collect(),
+            output: LinearConfig::new(self.hidden_size, 1).init(device),
             activation: Relu::new(),
         }
     }
@@ -368,17 +390,17 @@ impl ValueConfig {
 #[derive(Module, Debug)]
 struct Value<B: Backend> {
     input: Linear<B>,
-    hidden: Linear<B>,
+    hidden: Vec<Linear<B>>,
     output: Linear<B>,
     activation: Relu,
 }
 
 impl<B: Backend> Value<B> {
     fn value<const D: usize>(&self, state: Tensor<B, D>) -> Tensor<B, D> {
-        let x = self.input.forward(state);
-        let x = self.activation.forward(x);
-        let x = self.hidden.forward(x);
-        let x = self.activation.forward(x);
+        let mut x = self.activation.forward(self.input.forward(state));
+        for layer in &self.hidden {
+            x = self.activation.forward(layer.forward(x));
+        }
         self.output.forward(x)
     }
 }
