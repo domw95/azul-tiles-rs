@@ -97,6 +97,54 @@ impl PlayerBoard {
         }
     }
 
+    /// Tiles on the floor, the first-player token included. This is what
+    /// the end-of-round penalty is charged on.
+    pub fn floor_total(&self) -> u8 {
+        self.floor.total() + u8::from(self.first_player_tile)
+    }
+
+    /// Rebuild a board from its visible parts.
+    ///
+    /// For loading a position the engine did not play itself -- a board shown
+    /// by another implementation of the game, which is how the wasm player
+    /// gets the position the browser is displaying.
+    ///
+    /// The derived fields are not taken on trust: `predict_score` recomputes
+    /// them from the wall, rows, floor and score, so a caller cannot hand in
+    /// a board whose evaluation disagrees with its contents.
+    ///
+    /// `wall` is occupancy only, since every cell's colour is fixed by its
+    /// position. `rows` is the tile and count in each pattern line, from the
+    /// one-tile row down.
+    pub fn from_parts(
+        wall: &[[bool; 5]; 5],
+        rows: &[(Option<Tile>, u8); 5],
+        floor: TileGroup,
+        first_player_tile: bool,
+        score: u8,
+    ) -> Self {
+        let mut board = PlayerBoard::default();
+        for (r, row_ind) in RowIndex::iter().enumerate() {
+            for (c, occupied) in wall[r].iter().enumerate() {
+                if *occupied {
+                    board.wall.place_tile(row_ind, crate::playerboard::wall::WALL_COLOURS[r][c]);
+                }
+            }
+        }
+        for (row_ind, (tile, count)) in RowIndex::iter().zip(rows.iter()) {
+            if let (Some(tile), count) = (tile, *count) {
+                if count > 0 {
+                    board.place_tiles_in_row(row_ind, *tile, count);
+                }
+            }
+        }
+        board.floor = floor;
+        board.first_player_tile = first_player_tile;
+        board.score = score;
+        board.predict_score();
+        board
+    }
+
     /// Place tiles in a row or on the floor
     /// Does not check that the move is valid
     /// Updates predicted score

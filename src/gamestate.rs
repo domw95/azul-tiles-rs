@@ -63,6 +63,36 @@ impl Gamestate<2, 6> {
         Self::new(seed, first_player)
     }
 
+    /// Load a position played elsewhere.
+    ///
+    /// For a host that owns the game itself -- the browser, running the
+    /// TypeScript implementation -- and wants this engine to pick a move
+    /// inside it. `factories[0]` is the centre, as everywhere else.
+    ///
+    /// The bag and its generator are left at their defaults, which is sound
+    /// only because the search never deals: a round end is terminal, so no
+    /// line of play reaches a point where the bag matters. Do not call
+    /// `end_round` on a gamestate built this way and expect the next round to
+    /// be dealt faithfully.
+    pub fn from_parts(
+        factories: [TileGroup; 6],
+        first_player_tile: bool,
+        boards: [PlayerBoard; 2],
+        current_player: u8,
+        round: u16,
+    ) -> Self {
+        Self {
+            boards,
+            tilebag: TileGroup::new_empty(),
+            factories: factories.map(Some),
+            first_player_tile,
+            rng: rand::prelude::SmallRng::seed_from_u64(u64::from(round)),
+            current_player,
+            round,
+            state: State::RoundActive,
+        }
+    }
+
     /// Player 0's predicted lead, the absolute value negamax expects.
     ///
     /// Reads the unclamped `predicted_eval` rather than `predicted_score`, so

@@ -11,6 +11,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 azul-tiles-rs = { path = "..", default-features = false }
+strum = { version = "0.26.3", features = ["derive"] }
 # Redirected to the local minimaxer worktree by the [patch] below.
 minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git", default-features = false }
 
