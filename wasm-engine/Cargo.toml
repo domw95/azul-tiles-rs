@@ -1,0 +1,24 @@
+[package]
+name = "wasm-engine"
+version = "0.1.0"
+edition = "2021"
+
+# A spike, not a member of anything.
+[workspace]
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+azul-tiles-rs = { path = "..", default-features = false }
+# Redirected to the local minimaxer worktree by the [patch] below.
+minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git", default-features = false }
+
+[profile.release]
+opt-level = 3
+lto = true
+panic = "abort"
+
+# Patches only apply from the workspace root, which for this crate is itself.
+[patch."ssh://git@github.com/domw95/minimaxer-rs.git"]
+minimaxer = { path = "../../mx-wasm" }
