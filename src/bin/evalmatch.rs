@@ -253,6 +253,20 @@ fn main() {
     matchup("default vs hand set", default, hand_set, pairs, budget);
     matchup("default vs score only", default, score_only, pairs, budget);
     matchup("default-no-forecast vs default", default.without_forecast(), default, pairs, budget);
+
+    // A freshly fitted vector, if one has been written, measured against
+    // whatever is currently shipping. Runs in both modes: this is the
+    // comparison that decides whether the default changes.
+    let candidate: Option<Weights> = std::fs::File::open("eval_weights.json")
+        .ok()
+        .and_then(|f| serde_json::from_reader(f).ok())
+        .filter(|c: &Weights| *c != default);
+    if let Some(c) = candidate {
+        matchup("eval_weights.json vs default", c, default, pairs, budget);
+    } else {
+        println!("no distinct eval_weights.json to compare");
+    }
+
     if budget.time_us > 0 {
         // Timed runs cost ~10x a screen and have a +/-5 run to run spread on
         // this machine, so under a clock we ask only the decisive questions.
@@ -260,17 +274,5 @@ fn main() {
     }
     matchup("hand set vs score only", hand_set, score_only, pairs, budget);
     matchup("ts-forecast vs default", hand_set.with_ts_forecast(), default, pairs, budget);
-
-    // A freshly fitted vector, if one has been written, measured against
-    // whatever is currently shipping.
-    if let Ok(f) = std::fs::File::open("eval_weights.json") {
-        if let Ok(candidate) = serde_json::from_reader::<_, Weights>(f) {
-            if candidate != default {
-                matchup("eval_weights.json vs default", candidate, default, pairs, budget);
-            } else {
-                println!("eval_weights.json matches the default; nothing to compare");
-            }
-        }
-    }
 
 }

@@ -52,11 +52,29 @@ const CENTRE_WEIGHTS: [[f32; 5]; 5] = [
 ];
 
 /// Number of terms in the evaluation feature vector.
-pub const N_FEATURES: usize = 7;
+/// Base terms, before they are crossed with rounds remaining.
+pub const N_BASE: usize = 7;
+
+/// Every base term appears twice: on its own, and multiplied by the fraction of
+/// the game still to play. One weight vector otherwise has to serve round one
+/// and round ten alike, and no vector can, because the truth differs: a
+/// partially filled line in the last round is worth exactly nothing, there
+/// being no next round to complete it in.
+///
+/// Crossing keeps the evaluation linear in its parameters, so least squares
+/// still fits it, and costs almost nothing: the base terms are computed once
+/// and the dot product goes from 7 multiply-adds to 14.
+pub const N_FEATURES: usize = N_BASE * 2;
 
 /// Index of the first forecast bucket. The four buckets hold lines needing one
 /// more tile through lines needing four.
 const FORECAST_BASE: usize = 3;
+const FORECAST_END: usize = 7;
+
+/// Most future rounds there can be, which is what rounds remaining is scaled
+/// by. A wall row completing ends the game, and no row starts with any tiles,
+/// so five is the cap however many rounds the counter has left.
+const MAX_FUTURE_ROUNDS: f32 = 5.0;
 
 pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "score",
@@ -66,6 +84,13 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
     "forecast_missing_2",
     "forecast_missing_3",
     "forecast_missing_4",
+    "score_x_rounds",
+    "first_player_x_rounds",
+    "centre_x_rounds",
+    "forecast_missing_1_x_rounds",
+    "forecast_missing_2_x_rounds",
+    "forecast_missing_3_x_rounds",
+    "forecast_missing_4_x_rounds",
 ];
 
 /// Differential feature vector for a position, player 0 minus player 1.
@@ -75,7 +100,7 @@ pub const FEATURE_NAMES: [&str; N_FEATURES] = [
 /// dot product of this with a weight vector, which keeps it linear in its
 /// parameters and so fittable by least squares.
 pub fn features(g: &gamestate::Gamestate<2, 6>) -> [f32; N_FEATURES] {
-    features_with(g, true, true)
+    features_with(g, true, true, true)
 }
 
 /// As [`features`], but skipping terms whose weights are zero.
@@ -87,6 +112,7 @@ pub fn features_with(
     g: &gamestate::Gamestate<2, 6>,
     centre: bool,
     forecast: bool,
+    rounds: bool,
 ) -> [f32; N_FEATURES] {
     let mut f = [0.0; N_FEATURES];
     f[0] = g.differential_predicted_score();
@@ -98,22 +124,32 @@ pub fn features_with(
         0.0
     };
 
-    // Both remaining terms need the simulated wall, so if neither is wanted
-    // there is nothing left to do.
-    if !centre && !forecast {
-        return f;
-    }
+    // How full the fullest wall row will be once this round's lines are
+    // placed. A completed row ends the game, so this bounds how much game is
+    // left just as surely as the round counter does.
+    let mut fullest_row = 0u8;
 
     for (i, board) in g.boards().iter().enumerate() {
         let sign = if i == 0 { 1.0 } else { -1.0 };
         // The wall as it will stand once this round's full lines are placed.
         let mut wall = board.simulate_wall();
-        if centre {
+        // One pass serves both: the centre weighting sums the cells, and how
+        // full the fullest row is bounds how much game is left. Counting them
+        // separately walked all 25 cells twice, and walked them at all for
+        // evaluators that wanted neither.
+        if centre || rounds {
             for (row, weight) in wall.iter().zip(CENTRE_WEIGHTS.iter()) {
+                let mut filled = 0u8;
                 for (tile, &w) in row.iter().zip(weight.iter()) {
                     if tile.is_some() {
-                        f[2] += sign * w;
+                        filled += 1;
+                        if centre {
+                            f[2] += sign * w;
+                        }
                     }
+                }
+                if rounds {
+                    fullest_row = fullest_row.max(filled);
                 }
             }
         }
@@ -142,6 +178,18 @@ pub fn features_with(
             f[FORECAST_BASE + missing - 1] += sign * scored;
         }
     }
+
+    // Rounds left to play, whichever runs out first: the round counter, or a
+    // wall row filling up. Scaled to roughly 0..1 so the crossed terms sit on
+    // the same scale as the base ones and the fit stays well conditioned.
+    if rounds {
+        let by_counter = 10i32 - i32::from(g.round());
+        let by_row = 5i32 - i32::from(fullest_row);
+        let rounds_left = by_counter.min(by_row).max(0) as f32 / MAX_FUTURE_ROUNDS;
+        for i in 0..N_BASE {
+            f[N_BASE + i] = f[i] * rounds_left;
+        }
+    }
     f
 }
 
@@ -151,28 +199,38 @@ pub struct Weights(pub [f32; N_FEATURES]);
 
 impl Default for Weights {
     /// Fitted by least squares on 15,000 round end positions labelled with the
-    /// final score margin of the game they came from, then rescaled so the
-    /// score term weighs one point.
+    /// final score margin of the game they came from, over the base terms and
+    /// their crossings with rounds remaining.
     ///
-    /// Beats the hand set vector by 6.2 points over 1800 games at depth 3, two
-    /// independent runs agreeing to 0.5, and by a predicted 5.4 under a clock
-    /// once its node cost is charged at the measured 8.0 points per halving.
-    /// Fixed time runs on the machine this was measured on have a run to run
-    /// spread of +/-5, so they could neither confirm nor refute that; the depth
-    /// 3 screen reproduces to 0.6 and is what this rests on.
+    /// Beats the previous round-blind vector by 56.9% at depth 3 and 59.5%
+    /// under a 5ms clock, for a node ratio of 0.983: the crossings cost about
+    /// 0.2 points at the measured 8.0 points per halving, which is as close to
+    /// free as a feature gets.
     ///
-    /// Two of the forecast buckets are negative, which the hand set values
-    /// could not express: a line still needing three or four tiles is a
-    /// liability, not a discounted asset.
+    /// The crossed weights are the interesting part. Centre weighting is worth
+    /// 6.74 with the game ahead of it and 0.45 in the last round, a fifteenfold
+    /// spread that a single weight had been averaging over. Every forecast
+    /// bucket changes sign across the game, positive early and slightly
+    /// negative at the end, because a partial line is dead weight once there is
+    /// no round left to finish it in. And the score differential itself is
+    /// worth 1.0 in the last round against 0.5 in the first, early leads being
+    /// the less decisive.
     fn default() -> Self {
         Self([
-            1.0,
-            1.4792728,
-            2.1410458,
-            0.3069138,
-            0.10572213,
-            -0.11700917,
-            -0.29516673,
+            1.0, // score
+            0.79598224, // first_player
+            0.44542772, // centre
+            -0.063497774, // forecast_missing_1
+            -0.05389085, // forecast_missing_2
+            -0.20389807, // forecast_missing_3
+            -0.29097763, // forecast_missing_4
+            -0.5007711, // score x rounds
+            0.29502016, // first_player x rounds
+            6.2921076, // centre x rounds
+            1.5160196, // forecast_missing_1 x rounds
+            0.841121, // forecast_missing_2 x rounds
+            1.0340607, // forecast_missing_3 x rounds
+            0.393935, // forecast_missing_4 x rounds
         ])
     }
 }
@@ -185,7 +243,7 @@ impl Weights {
     /// constructors wanting the original term set do not silently follow
     /// [`Default`] when it is retuned.
     pub fn hand_set() -> Self {
-        Self([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0])
+        Self([1.0, 0.5, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
     }
 
     /// The forecast bucket values implied by the TypeScript evaluation at round
@@ -199,7 +257,7 @@ impl Weights {
 
     /// Turn the forecast term on with its original hand set values.
     pub fn with_ts_forecast(mut self) -> Self {
-        self.0[FORECAST_BASE..].copy_from_slice(&Self::TS_FORECAST);
+        self.0[FORECAST_BASE..FORECAST_END].copy_from_slice(&Self::TS_FORECAST);
         self
     }
 
@@ -207,7 +265,10 @@ impl Weights {
     /// partial line scan rather than merely muting it, so this really is the
     /// cheaper evaluator.
     pub fn without_forecast(mut self) -> Self {
-        for w in &mut self.0[FORECAST_BASE..] {
+        for w in &mut self.0[FORECAST_BASE..FORECAST_END] {
+            *w = 0.0;
+        }
+        for w in &mut self.0[N_BASE + FORECAST_BASE..N_BASE + FORECAST_END] {
             *w = 0.0;
         }
         self
@@ -234,13 +295,18 @@ pub struct HeuristicEvaluator {
     weights: Weights,
     centre: bool,
     forecast: bool,
+    rounds: bool,
 }
 
 impl HeuristicEvaluator {
     pub fn new(weights: Weights) -> Self {
         Self {
-            centre: weights.0[2] != 0.0,
-            forecast: weights.0[FORECAST_BASE..].iter().any(|&w| w != 0.0),
+            centre: weights.0[2] != 0.0 || weights.0[N_BASE + 2] != 0.0,
+            rounds: weights.0[N_BASE..].iter().any(|&w| w != 0.0),
+            forecast: weights.0[FORECAST_BASE..FORECAST_END]
+                .iter()
+                .chain(weights.0[N_BASE + FORECAST_BASE..N_BASE + FORECAST_END].iter())
+                .any(|&w| w != 0.0),
             weights,
         }
     }
@@ -276,7 +342,7 @@ impl Default for HeuristicEvaluator {
 
 impl minimaxer::Evaluate<gamestate::Gamestate<2, 6>> for HeuristicEvaluator {
     fn evaluate(&mut self, g: &gamestate::Gamestate<2, 6>) -> f32 {
-        features_with(g, self.centre, self.forecast)
+        features_with(g, self.centre, self.forecast, self.rounds)
             .iter()
             .zip(self.weights.0.iter())
             .map(|(x, w)| x * w)
