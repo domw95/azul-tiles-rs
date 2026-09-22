@@ -1,8 +1,16 @@
 #![recursion_limit = "512"]
 //! Capacity sweep at fixed data: is the depth-2 policy too small, or out of data?
 //!
-//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid]
+//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid] [patience] [min_delta]
 //! where grid is "320x1,640x2,1536x2" (hidden x hidden_layers), default below.
+//!
+//! Every cell must reach its own validation plateau, so max_epochs is a safety
+//! net rather than the budget: a cell stopped by the cap is a lower bound, and
+//! a lower bound on the largest nets is exactly where the trend would be
+//! misread, since capacity that has not finished fitting looks like capacity
+//! that does not help. Patience and min_delta are arguments because the bigger
+//! nets improve in smaller per-epoch steps, and a threshold tuned on the small
+//! net cuts them off while they are still climbing.
 //!
 //! An earlier sweep at 307k positions said capacity does not help, but there
 //! every net overfit. At 2.1M the same 320x1 net underfits, so that finding is
@@ -34,6 +42,8 @@ fn main() {
     let max_epochs: usize = a[3].parse().unwrap();
     let batch: usize = a[4].parse().unwrap();
     let out = std::path::PathBuf::from(&a[5]);
+    let patience: usize = a.get(7).map(|v| v.parse().unwrap()).unwrap_or(10);
+    let min_delta: f32 = a.get(8).map(|v| v.parse().unwrap()).unwrap_or(0.0002);
     let grid: Vec<(usize, usize)> = a
         .get(6)
         .map(|g| {
@@ -49,7 +59,7 @@ fn main() {
     let multi = MultiDataset::load_dir(&dir, "shard_").expect("labels");
     let data = multi.view_depth(depth).unwrap();
     println!(
-        "{} positions, depths {:?}, sweeping depth {depth} at batch {batch}, max {max_epochs} epochs",
+        "{} positions, depths {:?}, sweeping depth {depth} at batch {batch}, max {max_epochs} epochs, patience {patience}, min_delta {min_delta}",
         data.len(),
         multi.depths
     );
@@ -80,7 +90,7 @@ fn main() {
         let (trained, s) = behaviour_clone(
             ppo,
             data,
-            CloneStop { max_epochs, ..Default::default() },
+            CloneStop { max_epochs, patience, min_delta },
             batch,
             0.001,
             &device,
