@@ -552,3 +552,38 @@ pub extern "C" fn position_floor_total(player: u32) -> i32 {
         })
     })
 }
+
+/// Start pondering the position `set_position` loaded.
+///
+/// The pondering engine at the top of this file owns the game it plays, which
+/// is what a self-contained prototype wants and the wrong way round for a
+/// browser: there the page owns the game and the worker should own only the
+/// tree. This bridges the two, so a host can hand over a position and then
+/// call `ponder` in slices against it.
+///
+/// Returns the number of legal moves, or -1 if no position is loaded.
+#[no_mangle]
+pub extern "C" fn ponder_position() -> i32 {
+    POSITION.with(|p| {
+        let Some(g) = p.borrow().as_ref().cloned() else { return -1 };
+        let moves = g.get_moves().len() as i32;
+        ENGINE.with(|e| *e.borrow_mut() = Some(Engine::from_game(g)));
+        moves
+    })
+}
+
+/// The best move pondering has found, packed the way `search_move` packs its
+/// answer, or -1 before the first pass finishes.
+///
+/// Indices into the engine's own move list are no use to a host that
+/// generated its own, so this names the move the way the board does.
+#[no_mangle]
+pub extern "C" fn ponder_best() -> i32 {
+    with(
+        |e| match e.best.and_then(|i| e.moves.get(i)) {
+            Some(m) => pack(m),
+            None => -1,
+        },
+        -1,
+    )
+}
