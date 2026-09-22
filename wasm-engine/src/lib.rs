@@ -21,6 +21,8 @@ use azul_tiles_rs::players::minimax::ScoreEvaluator;
 use minimaxer::negamax::{Negamax, SearchOptions};
 use minimaxer::node::Node;
 use minimaxer::SearchExit;
+use core::sync::atomic::{AtomicU64, Ordering};
+use minimaxer::time::Instant;
 use std::cell::RefCell;
 use std::time::Duration;
 
@@ -374,6 +376,53 @@ fn pack(m: &Move) -> i32 {
     (factory << 8) | (tile << 4) | line
 }
 
+// What the last `search_move` found, for a host that wants to show its
+// working. Kept as statics rather than returned, because `extern "C"` gives
+// back one value and this is five.
+static SEARCH_DEPTH: AtomicU64 = AtomicU64::new(0);
+static SEARCH_NODES: AtomicU64 = AtomicU64::new(0);
+static SEARCH_MICROS: AtomicU64 = AtomicU64::new(0);
+static SEARCH_EXIT: AtomicU64 = AtomicU64::new(0);
+static SEARCH_VALUE: AtomicU64 = AtomicU64::new(0);
+
+/// Plies the last search completed.
+#[no_mangle]
+pub extern "C" fn search_depth() -> u32 {
+    SEARCH_DEPTH.load(Ordering::Relaxed) as u32
+}
+
+/// Nodes the last search created.
+#[no_mangle]
+pub extern "C" fn search_nodes() -> f64 {
+    SEARCH_NODES.load(Ordering::Relaxed) as f64
+}
+
+/// How long the last search took, in milliseconds.
+#[no_mangle]
+pub extern "C" fn search_ms() -> f64 {
+    SEARCH_MICROS.load(Ordering::Relaxed) as f64 / 1000.0
+}
+
+/// Why the last search stopped: 0 depth, 1 time, 2 exhaustive, 3 terminal.
+/// Exhaustive means the round was solved to its end, not merely searched deep.
+#[no_mangle]
+pub extern "C" fn search_exit() -> u32 {
+    SEARCH_EXIT.load(Ordering::Relaxed) as u32
+}
+
+/// The last search's evaluation, in points, from the point of view of the
+/// side to move -- negamax's convention, not player 0's.
+///
+/// Positive means the player whose turn it is expects to come out ahead by
+/// that much. Since a host only searches on its own engine's turn, it can
+/// show this as-is without flipping any signs. Verified rather than assumed:
+/// an otherwise identical position with player 0 fifty points up evaluates to
+/// +51 with player 0 to move and -49 with player 1 to move.
+#[no_mangle]
+pub extern "C" fn search_value() -> f32 {
+    f32::from_bits(SEARCH_VALUE.load(Ordering::Relaxed) as u32)
+}
+
 /// Search the loaded position and return the best move packed by [`pack`], or
 /// -1 if there is nothing to play.
 ///
@@ -400,7 +449,22 @@ pub extern "C" fn search_move(budget_ms: u32, max_depth: u32) -> i32 {
                 ..Default::default()
             },
         );
-        pack(&n.search().best)
+        let started = Instant::now();
+        let r = n.search();
+        SEARCH_DEPTH.store(u64::from(r.depth), Ordering::Relaxed);
+        SEARCH_NODES.store(u64::from(r.nodes), Ordering::Relaxed);
+        SEARCH_MICROS.store(started.elapsed().as_micros() as u64, Ordering::Relaxed);
+        SEARCH_EXIT.store(
+            match r.exit {
+                minimaxer::SearchExit::Depth => 0,
+                minimaxer::SearchExit::Time => 1,
+                minimaxer::SearchExit::Exhaustive => 2,
+                minimaxer::SearchExit::Terminal => 3,
+            },
+            Ordering::Relaxed,
+        );
+        SEARCH_VALUE.store(u64::from(r.value.to_bits()), Ordering::Relaxed);
+        pack(&r.best)
     })
 }
 
