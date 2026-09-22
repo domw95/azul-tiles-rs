@@ -12,7 +12,7 @@ const w = instance.exports;
 w.warmup();
 
 const ms = w.bench_playout(500);
-console.log(`playout    games=500 moves=${w.last_nodes()} ms=${ms.toFixed(1)} moves_per_sec=${(w.last_nodes() / ms * 1000).toFixed(0)}`);
+console.log(`playout    games=500 moves=${w.last_nodes()} ms=${ms.toFixed(1)} moves_per_sec=${(w.last_nodes() / ms * 1000).toFixed(0)} branching=${w.last_mean_depth().toFixed(2)}`);
 
 for (const [label, fn] of [["fixed", w.bench_fixed], ["deepen", w.bench_deepen]]) {
     for (const depth of [3, 4, 5]) {

@@ -97,6 +97,7 @@ fn record(out: (f64, u64, u64)) -> f64 {
 #[no_mangle]
 pub extern "C" fn bench_playout(n_games: u32) -> f64 {
     let mut moves_played = 0u64;
+    let mut offered = 0u64;
     let t = Instant::now();
     for seed in 1..=u64::from(n_games) {
         let mut g = Gamestate::<2, 6>::new_2_player_with_seed(seed, 0);
@@ -109,6 +110,7 @@ pub extern "C" fn bench_playout(n_games: u32) -> f64 {
                 }
                 continue;
             }
+            offered += moves.len() as u64;
             let m = moves[rng.next() as usize % moves.len()];
             moves_played += 1;
             if g.play_move(m) == State::GameEnd {
@@ -118,6 +120,8 @@ pub extern "C" fn bench_playout(n_games: u32) -> f64 {
     }
     let ms = t.elapsed().as_secs_f64() * 1000.0;
     LAST_NODES.store(moves_played, Ordering::Relaxed);
+    // Branching factor, so the drift check can compare all three bodies on it.
+    LAST_DEPTH_X100.store(offered * 100 / moves_played.max(1), Ordering::Relaxed);
     ms
 }
 
