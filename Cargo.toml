@@ -15,6 +15,10 @@ harness = false
 name = "search"
 harness = false
 
+[[bench]]
+name = "xlang"
+harness = false
+
 
 [features]
 # Train on the GPU via wgpu. Needs a Vulkan ICD installed.
