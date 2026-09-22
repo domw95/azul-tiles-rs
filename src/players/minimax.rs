@@ -129,6 +129,15 @@ pub fn features_with(
     // left just as surely as the round counter does.
     let mut fullest_row = 0u8;
 
+    // Everything below reads the simulated wall, so if nothing wants it there
+    // is nothing left to do. This was lost when the crossed terms went in, and
+    // without it a score-only evaluator pays for two wall simulations per leaf
+    // that it never looks at, inflating its node cost and flattering whatever
+    // is measured against it.
+    if !centre && !forecast && !rounds {
+        return f;
+    }
+
     for (i, board) in g.boards().iter().enumerate() {
         let sign = if i == 0 { 1.0 } else { -1.0 };
         // The wall as it will stand once this round's full lines are placed.
