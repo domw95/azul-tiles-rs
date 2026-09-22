@@ -1,3 +1,8 @@
 /target
 /ppo
 /ppo_large
+
+# The wasm spike crates are their own workspaces, so the root-anchored rule
+# above does not reach their build directories.
+/wasm-bench/target
+/wasm-engine/target

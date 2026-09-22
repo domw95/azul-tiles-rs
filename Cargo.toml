@@ -16,23 +16,47 @@ name = "search"
 harness = false
 
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# `rand::random` needs the std entropy source, which wasm does not have.
+rand = { version = "0.8.0", features = ["small_rng", "std", "std_rng"] }
+
 [features]
+default = ["full"]
+# Everything but the game rules and the minimax search: the GUI, the training
+# stack and the game runner. Off for a wasm build, which wants none of it and
+# cannot compile eframe or burn anyway.
+full = [
+    "dep:dyn-clone",
+    "dep:eframe",
+    "dep:egui",
+    "dep:nalgebra",
+    "dep:rand_distr",
+    "dep:rayon",
+    "dep:burn",
+    "minimaxer/parallel",
+]
 # Train on the GPU via wgpu. Needs a Vulkan ICD installed.
 gpu = []
 
 [dependencies]
 strum = { version = "0.26.3", features = ["derive"] }
-minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git" }
-dyn-clone = "1.0.18"
-rayon = "1.11.0"
-eframe = "0.31.0"
-egui = "0.31.0"
+minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git", default-features = false }
+dyn-clone = { version = "1.0.18", optional = true }
+rayon = { version = "1.11.0", optional = true }
+eframe = { version = "0.31.0", optional = true }
+egui = { version = "0.31.0", optional = true }
 fxhash = "0.2.1"
-nalgebra = { version = "0.33.2", features = ["rand", "serde", "serde-serialize"] }
-rand = { version = "0.8.0", features = ["small_rng"] }
-rand_distr = "0.4.0"
+nalgebra = { version = "0.33.2", features = ["rand", "serde", "serde-serialize"], optional = true }
+rand = { version = "0.8.0", default-features = false, features = ["small_rng"] }
+rand_distr = { version = "0.4.0", optional = true }
 serde = { version = "1.0.217", features = ["derive"] }
 serde_json = "1.0.138"
 log = "0.4.27"
 env_logger = "0.11.8"
-burn = { version = "0.18.0", features = ["autodiff", "ndarray", "wgpu"] }
+burn = { version = "0.18.0", features = ["autodiff", "ndarray", "wgpu"], optional = true }
+
+# Point at the sibling minimaxer worktree carrying the wasm changes. A spike
+# convenience: this pins the build to a particular checkout layout, and wants
+# replacing with a git revision before any of this is merged.
+[patch."ssh://git@github.com/domw95/minimaxer-rs.git"]
+minimaxer = { path = "../mx-wasm" }
