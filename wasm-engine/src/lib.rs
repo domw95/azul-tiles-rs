@@ -385,6 +385,27 @@ static SEARCH_MICROS: AtomicU64 = AtomicU64::new(0);
 static SEARCH_EXIT: AtomicU64 = AtomicU64::new(0);
 static SEARCH_VALUE: AtomicU64 = AtomicU64::new(0);
 
+thread_local! {
+    /// The line the last search expects, packed as [`pack`] does.
+    static SEARCH_PV: RefCell<Vec<i32>> = const { RefCell::new(Vec::new()) };
+}
+
+/// How many moves of the expected line the last search can name.
+///
+/// Often shorter than the depth reached: the tree is bounded, so once the
+/// line runs past what is still held there is nothing honest left to say.
+#[no_mangle]
+pub extern "C" fn search_pv_len() -> u32 {
+    SEARCH_PV.with(|pv| pv.borrow().len() as u32)
+}
+
+/// Move `i` of the expected line, packed as `search_move` packs its answer.
+/// Move 0 is the one `search_move` returned.
+#[no_mangle]
+pub extern "C" fn search_pv_move(i: u32) -> i32 {
+    SEARCH_PV.with(|pv| pv.borrow().get(i as usize).copied().unwrap_or(-1))
+}
+
 /// Plies the last search completed.
 #[no_mangle]
 pub extern "C" fn search_depth() -> u32 {
@@ -464,6 +485,9 @@ pub extern "C" fn search_move(budget_ms: u32, max_depth: u32) -> i32 {
             Ordering::Relaxed,
         );
         SEARCH_VALUE.store(u64::from(r.value.to_bits()), Ordering::Relaxed);
+        SEARCH_PV.with(|pv| {
+            *pv.borrow_mut() = n.principal_variation().iter().map(pack).collect();
+        });
         pack(&r.best)
     })
 }
