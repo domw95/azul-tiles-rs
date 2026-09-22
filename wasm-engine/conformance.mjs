@@ -27,10 +27,14 @@ const w = await loadEngine(
 let rounds = 0;
 let moves = 0;
 const failures = [];
-// Rust force-ends a game at round 10; TypeScript has no cap, and neither does
-// Azul. Past that point the two are playing different games by design, so a
-// divergence there is explained rather than a rules disagreement.
+// Rust force-ends a game at its round 10; TypeScript has no cap, and neither
+// does Azul. Past that point the two are playing different games by design, so
+// a divergence there is explained rather than a rules disagreement.
+//
+// Compared in the engine's counting, not TypeScript's: it deals in its
+// constructor, so its rounds run one ahead.
 const ROUND_CAP = 10;
+const engineRound = (tsRound) => tsRound + 1;
 let capped = 0;
 
 for (let seed = 1; seed <= games; seed++) {
@@ -69,7 +73,7 @@ for (let seed = 1; seed <= games; seed++) {
                 const ts = gs.playerBoards[p].score;
                 const rs = w.position_score(p);
                 if (ts !== rs) {
-                    if (gs.round > ROUND_CAP) {
+                    if (engineRound(gs.round) >= ROUND_CAP) {
                         capped++;
                     } else {
                         failures.push(
@@ -104,7 +108,8 @@ for (let seed = 1; seed <= games; seed++) {
 console.log(`${games} games, ${rounds} rounds, ${moves} moves replayed through both`);
 if (capped) {
     console.log(
-        `${capped} divergence(s) past round ${ROUND_CAP}, where Rust force-ends the game ` +
+        `${capped} divergence(s) at or past engine round ${ROUND_CAP}, where Rust force-ends ` +
+        `the game ` +
         `and TypeScript does not. Explained, not a rules disagreement.`,
     );
 }

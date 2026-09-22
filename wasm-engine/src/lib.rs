@@ -17,7 +17,7 @@
 //! representation.
 
 use azul_tiles_rs::gamestate::{Gamestate, Move, State};
-use azul_tiles_rs::players::minimax::ScoreEvaluator;
+use azul_tiles_rs::players::minimax::HeuristicEvaluator;
 use minimaxer::negamax::{Negamax, SearchOptions};
 use minimaxer::node::Node;
 use minimaxer::SearchExit;
@@ -35,7 +35,7 @@ const TT_BITS: u8 = 20;
 
 struct Engine {
     game: Gamestate<2, 6>,
-    search: Negamax<Gamestate<2, 6>, Move, ScoreEvaluator>,
+    search: Negamax<Gamestate<2, 6>, Move, HeuristicEvaluator>,
     /// Moves of the current position, in the order the indices refer to.
     moves: Vec<Move>,
     /// Set once a pass has searched the round out to its end.
@@ -68,7 +68,7 @@ impl Engine {
 
     fn from_game(game: Gamestate<2, 6>) -> Self {
         let moves = game.get_moves();
-        let search = Negamax::new(Node::new(game.clone()), ScoreEvaluator, options());
+        let search = Negamax::new(Node::new(game.clone()), HeuristicEvaluator::default(), options());
         Engine { game, search, moves, solved: false, depth: 0, value: 0.0, nodes: 0, best: None }
     }
 
@@ -98,7 +98,7 @@ impl Engine {
         // and a solved round stays solved only if the subtree kept covers it.
         if !self.search.play_move(&m) {
             // The move was never expanded -- start again from the new position.
-            self.search = Negamax::new(Node::new(self.game.clone()), ScoreEvaluator, options());
+            self.search = Negamax::new(Node::new(self.game.clone()), HeuristicEvaluator::default(), options());
             self.solved = false;
         }
         self.depth = self.search.root().searched_depth();
@@ -458,7 +458,7 @@ pub extern "C" fn search_move(budget_ms: u32, max_depth: u32) -> i32 {
         }
         let mut n = Negamax::new(
             Node::new(g),
-            ScoreEvaluator,
+            HeuristicEvaluator::default(),
             SearchOptions {
                 alpha_beta: true,
                 iterative: true,
@@ -525,6 +525,13 @@ pub extern "C" fn position_end_round() -> i32 {
         let mut borrow = p.borrow_mut();
         borrow.as_mut().map_or(-1, |g| state_code(g.end_round()) as i32)
     })
+}
+
+/// Round number of the loaded position, in this engine's counting: the first
+/// playable round is 1, because `new` deals before anyone moves.
+#[no_mangle]
+pub extern "C" fn position_round() -> i32 {
+    POSITION.with(|p| p.borrow().as_ref().map_or(-1, |g| i32::from(g.round())))
 }
 
 #[no_mangle]

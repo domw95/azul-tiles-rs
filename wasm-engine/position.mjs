@@ -15,15 +15,18 @@ export const NULL_TILE = -1;
  *
  * @param gs    an azul-tiles GameState
  * @param w     the module's exports
- * @param forRound  round number to record; the engine uses it only for the
- *                  first-player-token evaluation term
+ * @param forRound  round number, in TypeScript's counting. Converted: the
+ *                  engine deals in its constructor, so its first playable
+ *                  round is 1 where TypeScript's is 0. The evaluation crosses
+ *                  every term with rounds remaining, so getting this wrong
+ *                  skews the whole evaluation rather than one term.
  */
 export function writePosition(gs, w, forRound = gs.round) {
     const buf = positionView(w);
     buf.fill(0);
     buf[0] = gs.activePlayer;
     buf[1] = gs.firstTile === FIRST_PLAYER_TILE ? 1 : 0;
-    buf[2] = Math.min(255, forRound);
+    buf[2] = Math.min(255, forRound + 1);
 
     for (let f = 0; f < 6; f++) {
         const factory = gs.factory[f] ?? [];
