@@ -59,6 +59,7 @@ fn main() {
         Default::default(),
     );
 
+    std::fs::create_dir_all(&out).unwrap();
     let ppo = PPOMoveSelector::<B>::new(PPOConfig::default(), &device);
     let (ppo, summary) = pretrain_value(
         ppo,
@@ -68,10 +69,16 @@ fn main() {
         batch,
         lr,
         &device,
+        // Write every improvement rather than only the final model. An epoch
+        // over this set is minutes, so the checkpoint on disk is what makes
+        // the run survive a kill -- and makes it raceable before it finishes.
+        |best, epoch, ev| {
+            best.save(&out, "best").expect("checkpoint");
+            println!("  saved epoch {epoch} (ev {ev:+.3}) to {}", out.display());
+        },
     );
     println!("value fit: {summary:?}");
 
-    std::fs::create_dir_all(&out).unwrap();
     ppo.save(&out, "best").unwrap();
     println!("saved to {} in {:.0}s", out.display(), t0.elapsed().as_secs_f32());
 }

@@ -53,6 +53,7 @@ fn main() {
         256,
         0.001,
         &device,
+        |_, _, _| {},
     );
     println!("value: {value_summary:?}");
 

@@ -466,6 +466,13 @@ impl MultiDataset {
 /// epoch rather than the best was the flaw cloning had already lost, and it
 /// matters more here: mean squared error on a heavy-tailed target overfits
 /// visibly within a handful of epochs.
+///
+/// `on_best` is called with the model each time the held-out score improves,
+/// which is where a caller writes a checkpoint. An epoch over 2.1M positions
+/// takes minutes on a contended box, so a run that only saves when it returns
+/// can be hours of work with nothing on disk -- and the reason the run ends is
+/// as often a kill as a stopping rule. The same lesson the PPO loop learned
+/// from losing 1845 episodes.
 pub fn pretrain_value<B: AutodiffBackend>(
     mut ppo: PPOMoveSelector<B>,
     states_all: &[f32],
@@ -474,6 +481,7 @@ pub fn pretrain_value<B: AutodiffBackend>(
     batch_size: usize,
     learning_rate: f64,
     device: &B::Device,
+    mut on_best: impl FnMut(&PPOMoveSelector<B>, usize, f32),
 ) -> (PPOMoveSelector<B>, CloneSummary) {
     let mut optimiser = AdamConfig::new().init();
     let mut best_value = ppo.value.clone();
@@ -558,6 +566,9 @@ pub fn pretrain_value<B: AutodiffBackend>(
             best_val = ev;
             best_epoch = epoch;
             best_value = ppo.value.clone();
+            // `ppo` is the best model at this instant, so hand it over before
+            // the next epoch moves it on.
+            on_best(&ppo, epoch, ev);
         }
         println!(
             "value epoch {epoch}: mse {:.4}, val explained variance {ev:+.3}{}",

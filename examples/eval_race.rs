@@ -3,7 +3,10 @@
 //! Args: <eval_a> <eval_b> <budget> [games] [sort_on_create 1|0] [first_seed]
 //!
 //!   eval:   score | heuristic | handset | nn:<dir>[:<tag>]
-//!   budget: depth:<n> | time:<ms>
+//!   budget: depth:<n> | time:<ms>, or two of those comma separated to give
+//!           each side its own -- `depth:3,depth:2` is the ladder that
+//!           calibrates what a margin is worth, and it is the same harness,
+//!           so the numbers are directly comparable to an equal-budget race.
 //!
 //! **`time:` is the measurement that means anything; `depth:` is a control.**
 //! An evaluator that is better per leaf but slower per leaf buys its quality
@@ -53,10 +56,20 @@ impl<E: Evaluate<Gamestate<2, 6>>> Contender for Minimaxer<E> {
     }
 }
 
+/// Parse one or two budgets. One means both sides get it, which is the case
+/// worth measuring: the only difference between them is then the evaluation
+/// itself.
+fn budgets(spec: &str, sort_on_create: bool) -> (SearchOptions, SearchOptions) {
+    match spec.split_once(',') {
+        Some((a, b)) => (budget(a, sort_on_create), budget(b, sort_on_create)),
+        None => {
+            let o = budget(spec, sort_on_create);
+            (o, o)
+        }
+    }
+}
+
 /// Parse `depth:<n>` or `time:<ms>` into search options.
-///
-/// Both sides get the same options, so the only difference between them is the
-/// evaluation itself.
 fn budget(spec: &str, sort_on_create: bool) -> SearchOptions {
     let base = SearchOptions {
         alpha_beta: true,
@@ -121,7 +134,7 @@ fn main() {
     // up with everything already recorded.
     let first_seed: u64 = a.get(6).map(|v| v.parse().unwrap()).unwrap_or(9_000_000);
 
-    let opts = budget(&budget_spec, sort);
+    let (opts_a, opts_b) = budgets(&budget_spec, sort);
     println!(
         "{spec_a} vs {spec_b}, budget {budget_spec}, {games} games/seat, seeds {first_seed}.., sort_on_create {sort}"
     );
@@ -131,8 +144,8 @@ fn main() {
         let (mut wins, mut draws) = (0u32, 0u32);
         let mut margins: Vec<f64> = Vec::new();
         // Fresh searchers per seat so the node counts are per-seat too.
-        let mut pa = contender(&spec_a, opts);
-        let mut pb = contender(&spec_b, opts);
+        let mut pa = contender(&spec_a, opts_a);
+        let mut pb = contender(&spec_b, opts_b);
         for seed in first_seed..first_seed + games {
             let mut gs = Gamestate::new_2_player_with_seed(seed, 0);
             loop {
