@@ -163,6 +163,23 @@ impl PlayerBoard {
         self.predicted_score
     }
 
+    /// Occupancy the wall will have once this round's full lines are placed.
+    ///
+    /// The mask form of [`PlayerBoard::simulate_wall`], without the copy: the
+    /// evaluation only ever asked which cells were filled, never which colour
+    /// they were, and colour is fixed by position anyway.
+    pub fn projected_mask(&self) -> u32 {
+        let mut mask = self.wall.mask();
+        for row_ind in RowIndex::iter() {
+            if let Some((tile, count)) = self.rows[usize::from(row_ind)].0 {
+                if count == row_ind.row_capacity() {
+                    mask |= 1 << wall::cell_index(row_ind, tile);
+                }
+            }
+        }
+        mask
+    }
+
     /// Return a copy of the wall with all tiles moved to where they will be at the end
     /// of the round
     pub fn simulate_wall(&self) -> Wall {

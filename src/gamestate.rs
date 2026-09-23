@@ -82,6 +82,15 @@ impl<const P: usize, const F: usize> Gamestate<P, F> {
         gs
     }
 
+    /// Replace the deal rng.
+    ///
+    /// Sampling several possible next rounds from one position needs the deals
+    /// to differ, and the rng is otherwise carried along by the clone, so every
+    /// sample would see the same factories.
+    pub fn reseed(&mut self, seed: u64) {
+        self.rng = rand::prelude::SmallRng::seed_from_u64(seed);
+    }
+
     /// Get current game state
     pub fn state(&self) -> State {
         self.state

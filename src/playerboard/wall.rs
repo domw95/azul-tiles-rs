@@ -2,7 +2,7 @@
 //! Responsible for tracking correct placement of tiles in wall
 //! and counting points at end of round and end of game
 
-use std::ops::{Index, IndexMut};
+use std::ops::Index;
 
 use strum::IntoEnumIterator;
 
@@ -47,23 +47,27 @@ pub const WALL_COLOURS: [[Tile; 5]; 5] = [
 ];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct Wall([[Option<Tile>; 5]; 5]);
+pub struct Wall([[Option<Tile>; 5]; 5], u32);
+
+impl Wall {
+    /// Occupancy as a 25 bit mask, bit `5 * row + column`.
+    ///
+    /// Maintained by [`Wall::place_tile`], which is the only way a tile gets
+    /// onto the wall. Every cell's colour is fixed by its position, so this
+    /// describes the wall completely, and evaluation can work on it without
+    /// touching the cells at all.
+    pub fn mask(&self) -> u32 {
+        self.1
+    }
+}
 
 impl std::hash::Hash for Wall {
     /// Every cell's colour is fixed by its position, so occupancy alone
-    /// describes the wall. Hashing one u32 rather than 25 `Option<Tile>`
-    /// makes building a position key an order of magnitude cheaper, and two
-    /// walls are equal exactly when their occupancy matches.
+    /// describes the wall. Hashing the maintained mask rather than deriving it
+    /// from 25 `Option<Tile>` makes building a position key cheaper again, and
+    /// two walls are equal exactly when their occupancy matches.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        let mut mask: u32 = 0;
-        for (r, row) in self.0.iter().enumerate() {
-            for (c, cell) in row.iter().enumerate() {
-                if cell.is_some() {
-                    mask |= 1 << (r * 5 + c);
-                }
-            }
-        }
-        state.write_u32(mask);
+        state.write_u32(self.1);
     }
 }
 
@@ -72,12 +76,6 @@ impl Index<(RowIndex, ColumnIndex)> for Wall {
 
     fn index(&self, index: (RowIndex, ColumnIndex)) -> &Self::Output {
         &self.0[usize::from(&index.0)][usize::from(&index.1)]
-    }
-}
-
-impl IndexMut<(RowIndex, ColumnIndex)> for Wall {
-    fn index_mut(&mut self, index: (RowIndex, ColumnIndex)) -> &mut Self::Output {
-        &mut self.0[usize::from(&index.0)][usize::from(&index.1)]
     }
 }
 
@@ -103,7 +101,10 @@ impl Wall {
     /// Does not check if the move is valid
     /// Should have been previously checked with cell_available
     pub fn place_tile(&mut self, row: RowIndex, tile: Tile) {
-        self[(row, row.tile_column(&tile))] = Some(tile);
+        let col = row.tile_column(&tile);
+        let (r, c) = (usize::from(&row), usize::from(&col));
+        self.0[r][c] = Some(tile);
+        self.1 |= 1 << (r * 5 + c);
     }
 
     /// Calculate score of placing tile
@@ -183,11 +184,64 @@ impl Wall {
 
     /// Check for full row as game ending condition
     pub fn has_full_row(&self) -> bool {
-        self.0.iter().any(|row| row.iter().all(|t| t.is_some()))
+        (0..5).any(|r| (self.1 >> (r * 5)) & 0x1f == 0x1f)
     }
 
     pub(crate) fn tile_count(&self) -> u8 {
-        self.0.iter().flatten().filter(|t| t.is_some()).count() as u8
+        self.1.count_ones() as u8
+    }
+}
+
+/// Bit position of the cell a tile occupies in a row, for the occupancy mask.
+pub fn cell_index(row: RowIndex, tile: Tile) -> u32 {
+    let col = row.tile_column(&tile);
+    (usize::from(&row) * 5 + usize::from(&col)) as u32
+}
+
+/// Score for placing a tile at `bit`, read off an occupancy mask.
+///
+/// Same rule as [`Wall::score_tile`]: the contiguous run through the cell
+/// horizontally plus the run vertically, counting the cell once in each
+/// direction it extends, and one point if it touches nothing.
+pub fn score_tile_mask(mask: u32, bit: u32) -> u8 {
+    let (r, c) = ((bit / 5) as i32, (bit % 5) as i32);
+    let filled = |rr: i32, cc: i32| (mask >> (rr * 5 + cc)) & 1 == 1;
+
+    let mut row_score = 0u8;
+    let mut i = c - 1;
+    while i >= 0 && filled(r, i) {
+        row_score += 1;
+        i -= 1;
+    }
+    let mut i = c + 1;
+    while i < 5 && filled(r, i) {
+        row_score += 1;
+        i += 1;
+    }
+    if row_score > 0 {
+        row_score += 1;
+    }
+
+    let mut col_score = 0u8;
+    let mut i = r - 1;
+    while i >= 0 && filled(i, c) {
+        col_score += 1;
+        i -= 1;
+    }
+    let mut i = r + 1;
+    while i < 5 && filled(i, c) {
+        col_score += 1;
+        i += 1;
+    }
+    if col_score > 0 {
+        col_score += 1;
+    }
+
+    let score = row_score + col_score;
+    if score == 0 {
+        1
+    } else {
+        score
     }
 }
 
@@ -203,7 +257,7 @@ pub enum RowIndex {
 
 impl RowIndex {
     /// Returns column index of tile in row
-    fn tile_column(&self, tile: &Tile) -> ColumnIndex {
+    pub(crate) fn tile_column(&self, tile: &Tile) -> ColumnIndex {
         ((u8::from(self) + u8::from(tile)) % 5).into()
     }
 

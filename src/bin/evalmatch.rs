@@ -222,8 +222,12 @@ fn main() {
         return;
     }
 
-    let budget = if mode == "timed" {
-        let ms: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5.0);
+    // A probe runs only the null control and the candidate, for when the full
+    // set is too dear: depth 5 costs roughly sixteen times depth 3.
+    let probe = mode == "probe";
+    let budget = if mode == "timed" || (probe && args.get(4).map_or(false, |v| v != "0")) {
+        let idx = if probe { 4 } else { 3 };
+        let ms: f64 = args.get(idx).and_then(|s| s.parse().ok()).unwrap_or(5.0);
         Budget { depth: 0, time_us: (ms * 1000.0).round() as u64 }
     } else {
         // Screen at the depth the timed test actually reaches, otherwise the
@@ -237,6 +241,12 @@ fn main() {
     let hand_set = Weights::hand_set();
     let mut score_only = Weights([0.0; N_FEATURES]);
     score_only.0[0] = 1.0;
+    // A freshly fitted vector, if one has been written, measured against
+    // whatever currently ships. This is the comparison that decides the default.
+    let candidate: Option<Weights> = std::fs::File::open("eval_weights.json")
+        .ok()
+        .and_then(|f| serde_json::from_reader(f).ok())
+        .filter(|c: &Weights| *c != default);
 
     if budget.time_us > 0 {
         println!("{:.2}ms per move, {} games per matchup\n", budget.time_us as f64 / 1000.0, pairs * 4);
@@ -250,17 +260,17 @@ fn main() {
     // symmetric by construction and that comparison is not: see the nodes/move
     // ratio for that, and the calibrate mode for what a ratio costs.
     matchup("null control", default, default, pairs, budget);
+    if probe {
+        match &candidate {
+            Some(c) => matchup("candidate vs default", *c, default, pairs, budget),
+            None => println!("no distinct eval_weights.json to probe"),
+        }
+        return;
+    }
     matchup("default vs hand set", default, hand_set, pairs, budget);
     matchup("default vs score only", default, score_only, pairs, budget);
     matchup("default-no-forecast vs default", default.without_forecast(), default, pairs, budget);
 
-    // A freshly fitted vector, if one has been written, measured against
-    // whatever is currently shipping. Runs in both modes: this is the
-    // comparison that decides whether the default changes.
-    let candidate: Option<Weights> = std::fs::File::open("eval_weights.json")
-        .ok()
-        .and_then(|f| serde_json::from_reader(f).ok())
-        .filter(|c: &Weights| *c != default);
     if let Some(c) = candidate {
         matchup("eval_weights.json vs default", c, default, pairs, budget);
     } else {
