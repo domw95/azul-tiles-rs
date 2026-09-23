@@ -1,6 +1,6 @@
 #![recursion_limit = "512"]
 //! Race two evaluators against each other under one budget.
-//! Args: <eval_a> <eval_b> <budget> [games] [sort_on_create 1|0] [first_seed]
+//! Args: <eval_a> <eval_b> <budget> [games] [sort 1|0|a,b] [first_seed]
 //!
 //!   eval:   score | heuristic | handset | nn:<dir>[:<tag>]
 //!   budget: depth:<n> | time:<ms>, or two of those comma separated to give
@@ -56,17 +56,18 @@ impl<E: Evaluate<Gamestate<2, 6>>> Contender for Minimaxer<E> {
     }
 }
 
+/// Split `a,b` into two, or give both sides the same thing.
+fn pair(spec: &str) -> (&str, &str) {
+    spec.split_once(',').unwrap_or((spec, spec))
+}
+
 /// Parse one or two budgets. One means both sides get it, which is the case
 /// worth measuring: the only difference between them is then the evaluation
 /// itself.
-fn budgets(spec: &str, sort_on_create: bool) -> (SearchOptions, SearchOptions) {
-    match spec.split_once(',') {
-        Some((a, b)) => (budget(a, sort_on_create), budget(b, sort_on_create)),
-        None => {
-            let o = budget(spec, sort_on_create);
-            (o, o)
-        }
-    }
+fn budgets(spec: &str, sort: &str) -> (SearchOptions, SearchOptions) {
+    let (ba, bb) = pair(spec);
+    let (sa, sb) = pair(sort);
+    (budget(ba, sa != "0"), budget(bb, sb != "0"))
 }
 
 /// Parse `depth:<n>` or `time:<ms>` into search options.
@@ -129,12 +130,17 @@ fn main() {
     let spec_b = a[2].clone();
     let budget_spec = a[3].clone();
     let games: u64 = a.get(4).map(|v| v.parse().unwrap()).unwrap_or(200);
-    let sort: bool = a.get(5).map(|v| v != "0").unwrap_or(true);
+    // `sort_on_create` costs one evaluation per child, which is a good trade
+    // for an arithmetic evaluator and a ruinous one for a network -- it is the
+    // single knob that most changes how many times `evaluate` is called. So it
+    // is settable per side: a fair race lets each evaluator use the ordering
+    // policy that suits it, and `0,1` is that race.
+    let sort = a.get(5).cloned().unwrap_or_else(|| "1".into());
     // The seed range the policy holdouts and mm_vs_mm use, so the numbers line
     // up with everything already recorded.
     let first_seed: u64 = a.get(6).map(|v| v.parse().unwrap()).unwrap_or(9_000_000);
 
-    let (opts_a, opts_b) = budgets(&budget_spec, sort);
+    let (opts_a, opts_b) = budgets(&budget_spec, &sort);
     println!(
         "{spec_a} vs {spec_b}, budget {budget_spec}, {games} games/seat, seeds {first_seed}.., sort_on_create {sort}"
     );
