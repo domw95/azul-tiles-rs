@@ -8,6 +8,12 @@
 //! at batch 1 allocates tensors, dispatches kernels and rebuilds a 321-float
 //! input vector from scratch. Expect three to four orders of magnitude.
 //!
+//! Run it with `MATMUL_NUM_THREADS=1` set. Left alone, burn's ndarray backend
+//! fans a 321x320 gemv out across sixteen threads and then waits for them, and
+//! on a loaded box that costs 2.7 ms a call against 311 us single-threaded --
+//! system time running to twice user time. Threading a matrix-vector product
+//! this small cannot pay for itself under any load; it is pure loss here.
+//!
 //! So this type exists to be *measured*, not to be fast. Raced at equal time
 //! against the arithmetic evaluator it answers the question that decides
 //! whether the NNUE-style path in issue #3 is worth building: is a learned
