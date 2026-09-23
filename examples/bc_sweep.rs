@@ -1,7 +1,7 @@
 #![recursion_limit = "512"]
 //! Capacity sweep at fixed data: is the depth-2 policy too small, or out of data?
 //!
-//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid] [patience] [min_delta]
+//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid] [patience] [min_delta] [lr]
 //! where grid is "320x1,640x2,1536x2" (hidden x hidden_layers), default below.
 //!
 //! Every cell must reach its own validation plateau, so max_epochs is a safety
@@ -44,6 +44,11 @@ fn main() {
     let out = std::path::PathBuf::from(&a[5]);
     let patience: usize = a.get(7).map(|v| v.parse().unwrap()).unwrap_or(10);
     let min_delta: f32 = a.get(8).map(|v| v.parse().unwrap()).unwrap_or(0.0002);
+    // Sweeping capacity at one fixed rate cannot tell "this net is too big for
+    // the data" from "this net wants a smaller step". Wider layers usually
+    // want a lower rate, and a net bouncing around a poor optimum produces the
+    // same falling-validation signature as one that is memorising.
+    let lr: f64 = a.get(9).map(|v| v.parse().unwrap()).unwrap_or(0.001);
     let grid: Vec<(usize, usize)> = a
         .get(6)
         .map(|g| {
@@ -59,7 +64,7 @@ fn main() {
     let multi = MultiDataset::load_dir(&dir, "shard_").expect("labels");
     let data = multi.view_depth(depth).unwrap();
     println!(
-        "{} positions, depths {:?}, sweeping depth {depth} at batch {batch}, max {max_epochs} epochs, patience {patience}, min_delta {min_delta}",
+        "{} positions, depths {:?}, sweeping depth {depth} at batch {batch}, lr {lr}, max {max_epochs} epochs, patience {patience}, min_delta {min_delta}",
         data.len(),
         multi.depths
     );
@@ -92,7 +97,7 @@ fn main() {
             data,
             CloneStop { max_epochs, patience, min_delta },
             batch,
-            0.001,
+            lr,
             &device,
         );
         let secs = t0.elapsed().as_secs_f32();
@@ -106,7 +111,7 @@ fn main() {
         let gap = 100.0 * (s.best_train - s.best_val);
         writeln!(
             log,
-            "{{\"hidden\":{hidden},\"layers\":{layers},\"params\":{params},\"batch\":{batch},\"train\":{:.2},\"val\":{:.2},\"gap\":{:.2},\"best_epoch\":{},\"epochs_run\":{},\"stopped_early\":{},\"secs\":{:.0}}}",
+            "{{\"hidden\":{hidden},\"layers\":{layers},\"params\":{params},\"batch\":{batch},\"lr\":{lr},\"train\":{:.2},\"val\":{:.2},\"gap\":{:.2},\"best_epoch\":{},\"epochs_run\":{},\"stopped_early\":{},\"secs\":{:.0}}}",
             100.0 * s.best_train,
             100.0 * s.best_val,
             gap,
@@ -118,7 +123,7 @@ fn main() {
         .unwrap();
         log.flush().unwrap();
         println!(
-            "SWEEP hidden={hidden} layers={layers} params={params} train={:.2} val={:.2} gap={:.2} best_epoch={} epochs={} early={} {:.0}s",
+            "SWEEP hidden={hidden} layers={layers} params={params} lr={lr} train={:.2} val={:.2} gap={:.2} best_epoch={} epochs={} early={} {:.0}s",
             100.0 * s.best_train,
             100.0 * s.best_val,
             gap,
