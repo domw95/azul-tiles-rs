@@ -3,8 +3,8 @@
 //! Args: <eval_a> <eval_b> <budget> [games] [sort 1|0|a,b] [first_seed]
 //!
 //!   eval:   score | heuristic | handset | nn:<dir>[:<tag>]
-//!           | roundend:<dir>[:<tag>] -- network at round ends only, score
-//!             everywhere else; see `RoundEndOnly`
+//!           | roundend:<shallow>:<dir>[:<tag>] -- network at round ends
+//!             only, <shallow> everywhere else; see `RoundEndOnly`
 //!   budget: depth:<n> | time:<ms>, or two of those comma separated to give
 //!           each side its own -- `depth:3,depth:2` is the ladder that
 //!           calibrates what a margin is worth, and it is the same harness,
@@ -122,9 +122,13 @@ fn contender(spec: &str, opts: SearchOptions) -> Box<dyn Contender> {
             .expect("checkpoint");
             Box::new(Minimaxer::new(opts, spec, eval))
         }
-        // The network at round ends only, arithmetic everywhere else.
+        // The network at round ends only, arithmetic everywhere else. The
+        // cheap side is named rather than fixed: which arithmetic evaluator
+        // carries the other 95% of the leaves is most of what decides whether
+        // the combination is any good, and `score` is the weakest of them.
         "roundend" => {
-            let dir = parts.next().expect("roundend:<dir>[:<tag>]");
+            let shallow = parts.next().expect("roundend:<shallow>:<dir>[:<tag>]");
+            let dir = parts.next().expect("roundend:<shallow>:<dir>[:<tag>]");
             let tag = parts.next().unwrap_or("best");
             let device = Default::default();
             let deep = NnEvaluator::<NdArray>::from_checkpoint(
@@ -133,11 +137,19 @@ fn contender(spec: &str, opts: SearchOptions) -> Box<dyn Contender> {
                 &device,
             )
             .expect("checkpoint");
-            Box::new(Minimaxer::new(
-                opts,
-                spec,
-                RoundEndOnly { shallow: ScoreEvaluator, deep },
-            ))
+            match shallow {
+                "score" => Box::new(Minimaxer::new(
+                    opts,
+                    spec,
+                    RoundEndOnly { shallow: ScoreEvaluator, deep },
+                )),
+                "heuristic" => Box::new(Minimaxer::new(
+                    opts,
+                    spec,
+                    RoundEndOnly { shallow: HeuristicEvaluator::default(), deep },
+                )),
+                other => panic!("unknown shallow evaluator {other:?}"),
+            }
         }
         other => panic!("unknown evaluator {other:?}"),
     }
