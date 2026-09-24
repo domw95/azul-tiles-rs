@@ -3,6 +3,8 @@
 //! Args: <eval_a> <eval_b> <budget> [games] [sort 1|0|a,b] [first_seed]
 //!
 //!   eval:   score | heuristic | handset | nn:<dir>[:<tag>]
+//!           | roundend:<dir>[:<tag>] -- network at round ends only, score
+//!             everywhere else; see `RoundEndOnly`
 //!   budget: depth:<n> | time:<ms>, or two of those comma separated to give
 //!           each side its own -- `depth:3,depth:2` is the ladder that
 //!           calibrates what a margin is worth, and it is the same harness,
@@ -29,7 +31,7 @@
 //! the comparison that is trying to measure it.
 use azul_tiles_rs::gamestate::{Gamestate, Move, State};
 use azul_tiles_rs::players::minimax::{HeuristicEvaluator, Minimaxer, ScoreEvaluator, Weights};
-use azul_tiles_rs::players::nn_eval::NnEvaluator;
+use azul_tiles_rs::players::nn_eval::{NnEvaluator, RoundEndOnly};
 use azul_tiles_rs::players::Player;
 use burn::backend::NdArray;
 use minimaxer::negamax::SearchOptions;
@@ -119,6 +121,23 @@ fn contender(spec: &str, opts: SearchOptions) -> Box<dyn Contender> {
             )
             .expect("checkpoint");
             Box::new(Minimaxer::new(opts, spec, eval))
+        }
+        // The network at round ends only, arithmetic everywhere else.
+        "roundend" => {
+            let dir = parts.next().expect("roundend:<dir>[:<tag>]");
+            let tag = parts.next().unwrap_or("best");
+            let device = Default::default();
+            let deep = NnEvaluator::<NdArray>::from_checkpoint(
+                std::path::Path::new(dir),
+                tag,
+                &device,
+            )
+            .expect("checkpoint");
+            Box::new(Minimaxer::new(
+                opts,
+                spec,
+                RoundEndOnly { shallow: ScoreEvaluator, deep },
+            ))
         }
         other => panic!("unknown evaluator {other:?}"),
     }

@@ -104,6 +104,48 @@ impl<B: Backend> minimaxer::Evaluate<Gamestate<2, 6>> for NnEvaluator<B> {
     }
 }
 
+/// Spend the expensive evaluation only where the round has ended.
+///
+/// `is_terminal` is `is_round_over` here, so a search bottoms out at either
+/// the depth limit or the end of a round, and both kinds of leaf call
+/// `evaluate`. Round ends are the minority, so paying a lot for them and
+/// almost nothing elsewhere costs the average of the two weighted by how often
+/// each occurs -- measured by `leaf_mix` at 0.1% of evaluations under a fixed
+/// depth and 5.2% under a clock, the latter because iterative deepening runs
+/// far past the nominal depth in late-round positions, where the tree is
+/// truncated by the round ending and so is cheap to exhaust.
+///
+/// Round end is also the natural place for a learned value: it is the one
+/// position whose labels can be made *exact*, since a search with no depth cap
+/// terminates there, and it is where a score differential is least informative
+/// about what the position is actually worth.
+///
+/// **A head fitted by `fit_value` on `gen_labels` output has never seen a
+/// round-over position.** That generator records a position only when it has
+/// legal moves, so every training position had a non-empty factory. Using one
+/// here is therefore out of distribution, and a poor result says as much about
+/// the labels as about the idea. The exhaustive round-end labels are what this
+/// wants.
+#[derive(Debug, Clone)]
+pub struct RoundEndOnly<S, D> {
+    pub shallow: S,
+    pub deep: D,
+}
+
+impl<S, D> minimaxer::Evaluate<Gamestate<2, 6>> for RoundEndOnly<S, D>
+where
+    S: minimaxer::Evaluate<Gamestate<2, 6>>,
+    D: minimaxer::Evaluate<Gamestate<2, 6>>,
+{
+    fn evaluate(&mut self, g: &Gamestate<2, 6>) -> f32 {
+        if g.is_round_over() {
+            self.deep.evaluate(g)
+        } else {
+            self.shallow.evaluate(g)
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
