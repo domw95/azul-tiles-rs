@@ -333,6 +333,7 @@ pub fn behaviour_clone_streaming<B: AutodiffBackend>(
     let mut rng = rand::thread_rng();
     let mut best_policy = ppo.policy.clone();
     let mut best_val = f32::NEG_INFINITY;
+    let mut best_train = 0.0f32;
     let mut best_epoch = 0usize;
     let mut epochs_run = 0usize;
     let mut stopped_early = false;
@@ -340,6 +341,12 @@ pub fn behaviour_clone_streaming<B: AutodiffBackend>(
     for epoch in 0..stop.max_epochs {
         epochs_run = epoch + 1;
         let (mut loss_sum, mut batches) = (0.0f32, 0usize);
+        // Training agreement, accumulated from the same forward passes the
+        // gradient comes from, so it costs one argmax per batch. Reported at
+        // the best-validation epoch: the gap between the two is what separates
+        // "too small to fit" from "memorising", and neither number means much
+        // without the other.
+        let (mut train_seen, mut train_correct) = (0usize, 0usize);
         for chunk in train.epoch(buffer_shards, &mut rng) {
             let chunk = chunk?;
             for start in (0..chunk.len()).step_by(batch_size) {
@@ -347,6 +354,15 @@ pub fn behaviour_clone_streaming<B: AutodiffBackend>(
                 let (states, masks, targets) =
                     batch_tensors::<B>(&chunk, start, end, device);
                 let log_probs = log_softmax(ppo.policy.action(states) + masks, 1);
+                train_correct += log_probs
+                    .clone()
+                    .argmax(1)
+                    .equal(targets.clone())
+                    .int()
+                    .sum()
+                    .into_scalar()
+                    .to_usize();
+                train_seen += end - start;
                 // Negative log likelihood of the teacher's move.
                 let loss = -log_probs.gather(1, targets).mean();
                 loss_sum += loss.clone().into_scalar().to_f32();
@@ -357,14 +373,15 @@ pub fn behaviour_clone_streaming<B: AutodiffBackend>(
             }
         }
 
+        let train_acc = train_correct as f32 / train_seen.max(1) as f32;
         let v = agreement(&ppo, val, batch_size, buffer_shards, device)?;
         log::info!(
-            "epoch {epochs_run}: loss {:.4}, val agreement {:.4}",
+            "epoch {epochs_run}: loss {:.4}, train agreement {train_acc:.4}, val agreement {v:.4}",
             loss_sum / batches.max(1) as f32,
-            v
         );
         if v > best_val + stop.min_delta {
             best_val = v;
+            best_train = train_acc;
             best_epoch = epochs_run;
             best_policy = ppo.policy.clone();
         } else if epochs_run - best_epoch >= stop.patience {
@@ -374,5 +391,5 @@ pub fn behaviour_clone_streaming<B: AutodiffBackend>(
     }
 
     ppo.policy = best_policy;
-    Ok((ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early }))
+    Ok((ppo, CloneSummary { epochs_run, best_epoch, best_val, best_train, stopped_early }))
 }

@@ -592,7 +592,12 @@ pub fn pretrain_value<B: AutodiffBackend>(
     }
     // Return the best, not the last.
     ppo.value = best_value;
-    (ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early })
+    // NaN rather than 0.0: this shares `CloneSummary` with the policy clone,
+    // but value pretraining is regression and has no training-*agreement* to
+    // report. A zero here would read as "fitted nothing" in a printed summary;
+    // NaN says "not applicable" and cannot be averaged into anything by
+    // accident.
+    (ppo, CloneSummary { epochs_run, best_epoch, best_val, best_train: f32::NAN, stopped_early })
 }
 
 /// When to stop cloning.
