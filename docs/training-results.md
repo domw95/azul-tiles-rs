@@ -5,6 +5,23 @@ alpha-beta, TT 2^20) on held-out seeds `9_000_000+`, which never appear in
 training: `gen_labels` used seeds `0..40000` and the in-loop eval uses
 `EVAL_SEED_BASE = 1_000_000`.
 
+**What that opponent is and is not.** It is *fixed* and deterministic at fixed
+depth, which is what makes every comparison here sound — all of them share it.
+It is not the strongest opponent available: `HeuristicEvaluator` with fitted
+weights has been measured beating `ScoreEvaluator` by roughly 70/30 under a 5ms
+clock, though that is one timed run on a loaded box and should be treated as
+approximate rather than as a figure to re-baseline against. So "beats depth-2
+minimax at 65.3%" is a narrower claim than it sounds, and a stronger
+*reproducible* opponent exists if one is wanted:
+`HeuristicEvaluator::new(Weights::hand_set())` at fixed depth is deterministic
+and sits between the two.
+
+Verified across master's evaluator rework (through e013a5a): `ScoreEvaluator`'s
+impl is byte-identical, and — since an unchanged body proves nothing about
+changed inputs, and 111 lines moved under `gamestate.rs` and `playerboard/` —
+`holdout ft_320x1 300` reproduces exactly, 69.0%/62.0% with means 47.4v39.8 and
+45.8v39.9 on both seats.
+
 Dataset throughout: 2,129,455 positions labelled at search depths 1, 2 and 3,
 encoded with the 321-float encoder, depth-2 labels used for cloning.
 
