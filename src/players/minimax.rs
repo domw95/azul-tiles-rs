@@ -1,5 +1,4 @@
 use crate::gamestate;
-use crate::playerboard::wall::{cell_index, score_tile_mask};
 use log::debug;
 use minimaxer::{self, negamax::SearchOptions, node::Node, Evaluate};
 
@@ -130,37 +129,36 @@ pub fn features_with(
     // left just as surely as the round counter does.
     let mut fullest_row = 0u8;
 
-    // Everything below reads the wall, so if nothing wants it there is
-    // nothing left to do. Without this a score-only evaluator pays for wall
-    // work per leaf that it never looks at, inflating its node cost and
-    // flattering whatever is measured against it.
+    // Everything below reads the simulated wall, so if nothing wants it there
+    // is nothing left to do. This was lost when the crossed terms went in, and
+    // without it a score-only evaluator pays for two wall simulations per leaf
+    // that it never looks at, inflating its node cost and flattering whatever
+    // is measured against it.
     if !centre && !forecast && !rounds {
         return f;
     }
 
     for (i, board) in g.boards().iter().enumerate() {
         let sign = if i == 0 { 1.0 } else { -1.0 };
-        // Occupancy the wall will have once this round's full lines land.
-        // Nothing here needs the colours, only which cells are taken, so this
-        // replaces a copy of the whole wall with one integer.
-        let mut mask = board.projected_mask();
-
+        // The wall as it will stand once this round's full lines are placed.
+        let mut wall = board.simulate_wall();
+        // One pass serves both: the centre weighting sums the cells, and how
+        // full the fullest row is bounds how much game is left. Counting them
+        // separately walked all 25 cells twice, and walked them at all for
+        // evaluators that wanted neither.
         if centre || rounds {
-            for r in 0..5usize {
-                let bits = (mask >> (r * 5)) & 0x1f;
-                if centre {
-                    // Cell by cell in the original order: a table of per row
-                    // sums would be quicker still, but re-associating the
-                    // addition changes the last bits of the result and with
-                    // them, occasionally, the move chosen.
-                    for c in 0..5usize {
-                        if (bits >> c) & 1 == 1 {
-                            f[2] += sign * CENTRE_WEIGHTS[r][c];
+            for (row, weight) in wall.iter().zip(CENTRE_WEIGHTS.iter()) {
+                let mut filled = 0u8;
+                for (tile, &w) in row.iter().zip(weight.iter()) {
+                    if tile.is_some() {
+                        filled += 1;
+                        if centre {
+                            f[2] += sign * w;
                         }
                     }
                 }
                 if rounds {
-                    fullest_row = fullest_row.max(bits.count_ones() as u8);
+                    fullest_row = fullest_row.max(filled);
                 }
             }
         }
@@ -185,12 +183,14 @@ pub fn features_with(
             }
             let Some(tile) = line.tile() else { continue };
             let missing = usize::from(capacity - count);
-            let bit = cell_index(row_ind, tile);
-            f[FORECAST_BASE + missing - 1] += sign * f32::from(score_tile_mask(mask, bit));
-            mask |= 1 << bit;
+            let scored = f32::from(wall.place_and_score_tile(row_ind, tile));
+            f[FORECAST_BASE + missing - 1] += sign * scored;
         }
     }
 
+    // Rounds left to play, whichever runs out first: the round counter, or a
+    // wall row filling up. Scaled to roughly 0..1 so the crossed terms sit on
+    // the same scale as the base ones and the fit stays well conditioned.
     if rounds {
         let by_counter = 10i32 - i32::from(g.round());
         let by_row = 5i32 - i32::from(fullest_row);
