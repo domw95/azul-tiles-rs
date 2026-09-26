@@ -3,6 +3,7 @@ use crate::playerboard::wall::{cell_index, score_tile_mask};
 use log::debug;
 use minimaxer::{self, negamax::SearchOptions, node::Node, Evaluate};
 
+#[cfg(feature = "full")]
 use super::Player;
 
 impl minimaxer::Gamestate<gamestate::Move> for gamestate::Gamestate<2, 6> {
@@ -392,6 +393,7 @@ impl<E> Minimaxer<E> {
     }
 }
 
+#[cfg(feature = "full")]
 impl<E: Evaluate<gamestate::Gamestate<2, 6>>> Player<2, 6> for Minimaxer<E> {
     fn pick_move(
         &mut self,

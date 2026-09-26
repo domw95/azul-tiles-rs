@@ -30,8 +30,28 @@ pub struct Gamestate<const P: usize, const F: usize> {
 
 impl<const P: usize, const F: usize> Default for Gamestate<P, F> {
     fn default() -> Self {
-        Self::new(rand::random(), 0)
+        Self::new(default_seed(), 0)
     }
+}
+
+/// The seed for a game nobody seeded.
+///
+/// `rand::random` needs `getrandom`, which on `wasm32-unknown-unknown` only
+/// works through the wasm-bindgen JS shim. A tile shuffle does not need
+/// entropy of that quality, so on wasm the seed comes from the host clock and
+/// a call counter instead.
+#[cfg(not(target_arch = "wasm32"))]
+fn default_seed() -> u64 {
+    rand::random()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn default_seed() -> u64 {
+    use core::sync::atomic::{AtomicU64, Ordering};
+
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
+    let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+    minimaxer::time::now_millis().to_bits() ^ n.wrapping_mul(0x9E37_79B9_7F4A_7C15)
 }
 
 impl Gamestate<2, 6> {
@@ -41,6 +61,36 @@ impl Gamestate<2, 6> {
 
     pub fn new_2_player_with_seed(seed: u64, first_player: u8) -> Self {
         Self::new(seed, first_player)
+    }
+
+    /// Load a position played elsewhere.
+    ///
+    /// For a host that owns the game itself -- the browser, running the
+    /// TypeScript implementation -- and wants this engine to pick a move
+    /// inside it. `factories[0]` is the centre, as everywhere else.
+    ///
+    /// The bag and its generator are left at their defaults, which is sound
+    /// only because the search never deals: a round end is terminal, so no
+    /// line of play reaches a point where the bag matters. Do not call
+    /// `end_round` on a gamestate built this way and expect the next round to
+    /// be dealt faithfully.
+    pub fn from_parts(
+        factories: [TileGroup; 6],
+        first_player_tile: bool,
+        boards: [PlayerBoard; 2],
+        current_player: u8,
+        round: u16,
+    ) -> Self {
+        Self {
+            boards,
+            tilebag: TileGroup::new_empty(),
+            factories: factories.map(Some),
+            first_player_tile,
+            rng: rand::prelude::SmallRng::seed_from_u64(u64::from(round)),
+            current_player,
+            round,
+            state: State::RoundActive,
+        }
     }
 
     /// Player 0's predicted lead, the absolute value negamax expects.
