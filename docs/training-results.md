@@ -125,8 +125,8 @@ budget. Validation agreement over the held-out 10% (~213k positions):
 3.68, 4.44 — which says the nets overfit rather than underfit, and is consistent
 with data being the binding constraint. Consistent with, not proof of: the gap
 alone cannot distinguish "more data would help" from "the target is only
-partly predictable from this encoding", and validation sits ~30 points below the
-~86.5% learnable ceiling measured below. A learning curve over dataset fraction
+partly predictable from this encoding", and validation sits ~32 points below the
+88.2% learnable ceiling measured below. A learning curve over dataset fraction
 (`examples/learning_curve.rs`, fixed validation set, fractions sampled by whole
 game) is the direct test and is not yet run. Larger nets
 peak earlier and then decay for as long as they are allowed to run (2048x2 at
@@ -141,26 +141,33 @@ is genuine overfitting and not an untuned step size.
 
 ## What is learnable from a depth-2 teacher
 
-Measured independently by the exhaustive-search generator (azul-eval-ce), 237
-exact positions from 5 games — small sample, positions within a game correlated,
-so intervals are wider than binomial:
+Measured independently by the exhaustive-search generator (azul-eval-ce), two
+runs at different node budgets. **Regime:** ~260 exact positions from 5 games
+each, positions within a game correlated so true intervals are wider than the
+binomial ones shown; `random_best` off, so ties are broken deterministically
+rather than by coin flip.
 
 | depth | agrees with exact | mean value lost per decision |
 |---|---|---|
-| 1 | 40.1% | 1.565 |
-| 2 | 48.5% | 1.329 |
-| 3 | 55.3% | 1.059 |
-| 4 | 60.3% | 0.949 |
-| 6 | 75.5% | 0.574 |
+| 1 | 39% | 1.67 |
+| 2 | 45% | 1.30 |
+| 3 | 51% | 1.16 |
+| 4 | 59% | 0.82 |
+| 6 | 72% | 0.45 |
 
-**Learnable ceiling against depth-2 targets: ~86.5%** — 25% of positions carry a
-tie at depth 2's own top value, and a net that ranks perfectly still scores 1/k
-on those. So the 56-57% validation agreement above is ~30 points below what is
-learnable, and ties do not explain it. (This figure excludes positions that hit
-the node budget, which are the large-tree ones and plausibly carry more
-near-equal moves, so it is biased slightly upward.)
+**Learnable ceiling against depth-2 targets: 88.2% [84.3, 92.1]** — 22% of
+positions carry a tie at depth 2's own top value, and a net that ranks perfectly
+still scores 1/k on those. So the 56.41 validation agreement above is **31.8
+points** below what is learnable, and ties do not explain it.
 
-Note this bounds *imitability*, not quality: **depth 2 concedes 1.329 points of
+That ceiling is robust to the one bias we knew about. Raising the node budget
+from 3M to 20M cut excluded (budget-exceeded) positions from 11.6% to 4.0%, and
+the ceiling did *not* fall — it rose slightly, 86.5% to 88.2%, well inside both
+intervals. So large-tree positions do not carry more tie mass, contrary to the
+obvious guess; plausibly a large tree means a tactically live position where
+exact search finds real distinctions, while a small tree means a forced one.
+
+Note this bounds *imitability*, not quality: **depth 2 concedes ~1.3 points of
 value per decision** against a solved round, over ~50 decisions a game. A net
 can imitate it faithfully and still inherit a policy that gives away real value,
 which is consistent with fine-tuning being where the strength comes from.
