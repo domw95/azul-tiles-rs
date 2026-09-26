@@ -1,7 +1,14 @@
 #![recursion_limit = "512"]
 //! Capacity sweep at fixed data: is the depth-2 policy too small, or out of data?
 //!
-//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid] [patience] [min_delta] [lr]
+//! Args: <labels_dir> <depth> <max_epochs> <batch> <out_dir> [grid] [patience] [min_delta] [lr] [limit]
+//!
+//! `limit` truncates the dataset to its first N positions. Its purpose is the
+//! cheapest diagnostic available on a training loop: a net given far more
+//! capacity than data should drive TRAIN agreement close to the learnable
+//! ceiling. If it cannot, the fault is in the loop, the labels or the encoding
+//! -- not in the data volume -- and no amount of sweeping the architecture will
+//! show that, because every cell shares the fault.
 //! where grid is "320x1,640x2,1536x2" (hidden x hidden_layers), default below.
 //!
 //! Every cell must reach its own validation plateau, so max_epochs is a safety
@@ -18,7 +25,7 @@
 //! be located again. Batch is held at one value across the whole grid: capacity
 //! is then the only thing that varies, and the cells stay comparable to each
 //! other (not to a run at a different batch, since the rate was not retuned).
-use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, CloneStop, MultiDataset};
+use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, CloneStop, DataView, MultiDataset};
 use azul_tiles_rs::players::ppo::{
     PPOConfig, PPOMoveSelector, PolicyConfig, ValueConfig, ACTION_SIZE, STATE_SIZE,
 };
@@ -49,6 +56,7 @@ fn main() {
     // want a lower rate, and a net bouncing around a poor optimum produces the
     // same falling-validation signature as one that is memorising.
     let lr: f64 = a.get(9).map(|v| v.parse().unwrap()).unwrap_or(0.001);
+    let limit: usize = a.get(10).map(|v| v.parse().unwrap()).unwrap_or(usize::MAX);
     let grid: Vec<(usize, usize)> = a
         .get(6)
         .map(|g| {
@@ -62,7 +70,15 @@ fn main() {
         .unwrap_or_else(|| vec![(320, 1), (640, 1), (640, 2), (1024, 2), (1536, 2), (1024, 4)]);
 
     let multi = MultiDataset::load_dir(&dir, "shard_").expect("labels");
-    let data = multi.view_depth(depth).unwrap();
+    let mut data = multi.view_depth(depth).unwrap();
+    if limit < data.len() {
+        data = DataView {
+            states: &data.states[..limit * STATE_SIZE],
+            masks: &data.masks[..limit * ACTION_SIZE],
+            targets: &data.targets[..limit],
+        };
+        println!("TRUNCATED to {limit} positions (overfit diagnostic)");
+    }
     println!(
         "{} positions, depths {:?}, sweeping depth {depth} at batch {batch}, lr {lr}, max {max_epochs} epochs, patience {patience}, min_delta {min_delta}",
         data.len(),
