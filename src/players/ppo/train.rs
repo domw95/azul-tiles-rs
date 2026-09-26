@@ -381,6 +381,9 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             ..Default::default()
         };
         let mut best_episode = 0;
+        // Deliberately separate from `best_smoothed` below, which drives the
+        // patience check and must keep its own update order.
+        let mut best_saved_smooth = f32::NEG_INFINITY;
         let mut smoothed: Option<f32> = None;
         let mut best_smoothed = f32::NEG_INFINITY;
         let mut best_smoothed_episode = 0;
@@ -530,7 +533,13 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                 );
             }
 
-            if eval.margin > best.margin {
+            // Compare smoothed margins rather than single evals. The 40-game
+            // eval is noisy enough that the max over hundreds of draws is
+            // dominated by luck -- a lucky early eval can otherwise block every
+            // later save, and a run improves for thousands of episodes with
+            // nothing written to disk.
+            if smooth > best_saved_smooth {
+                best_saved_smooth = smooth;
                 best = eval;
                 best_episode = episode;
                 ppo.save(&options.dir, "best").unwrap();
@@ -548,6 +557,14 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                         options.dir.join("optim_best_value"),
                     )
                     .unwrap();
+            }
+            // Also keep a periodic snapshot of the current policy. Any
+            // selection rule can be fooled, and without this the policy a run
+            // actually ends on is unrecoverable: the checkpoint written is the
+            // selected one, so a run that improves after its last save throws
+            // that improvement away on exit.
+            if episode % 100 == 0 {
+                ppo.save(&options.dir, "last").unwrap();
             }
             if smooth > best_smoothed {
                 best_smoothed = smooth;

@@ -623,6 +623,9 @@ pub struct CloneSummary {
     pub epochs_run: usize,
     pub best_epoch: usize,
     pub best_val: f32,
+    /// Training agreement in the same epoch as `best_val`. The gap between
+    /// the two is what says whether a net is too small or is memorising.
+    pub best_train: f32,
     pub stopped_early: bool,
 }
 
@@ -643,6 +646,7 @@ pub fn behaviour_clone<B: AutodiffBackend>(
     // starts overfitting still returns its best model rather than its last.
     let mut best_policy = ppo.policy.clone();
     let mut best_val = f32::NEG_INFINITY;
+    let mut best_train = 0.0f32;
     let mut best_epoch = 0usize;
     let mut epochs_run = 0usize;
     let mut stopped_early = false;
@@ -730,16 +734,18 @@ pub fn behaviour_clone<B: AutodiffBackend>(
                 .to_usize();
         }
         let val_acc = val_correct as f32 / val.max(1) as f32;
+        let train_acc = correct as f32 / n.max(1) as f32;
         let improved = val_acc > best_val + stop.min_delta;
         if improved {
             best_val = val_acc;
+            best_train = train_acc;
             best_epoch = epoch;
             best_policy = ppo.policy.clone();
         }
         println!(
             "bc epoch {epoch}: loss {:.4}, train {:.1}%, val {:.1}%{}",
             total / batches.max(1) as f32,
-            100.0 * correct as f32 / n as f32,
+            100.0 * train_acc,
             100.0 * val_acc,
             if improved { " *" } else { "" }
         );
@@ -762,7 +768,7 @@ pub fn behaviour_clone<B: AutodiffBackend>(
     }
     // Return the best, not the last.
     ppo.policy = best_policy;
-    (ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early })
+    (ppo, CloneSummary { epochs_run, best_epoch, best_val, best_train, stopped_early })
 }
 
 #[cfg(test)]
