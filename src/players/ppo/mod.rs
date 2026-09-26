@@ -18,6 +18,7 @@ use crate::{
 };
 
 pub mod pretrain;
+pub mod stream;
 pub mod train;
 
 /// Length of the encoded gamestate.

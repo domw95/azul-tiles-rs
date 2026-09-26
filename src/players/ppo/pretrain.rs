@@ -289,7 +289,7 @@ impl MultiDataset {
         f.flush()
     }
 
-    fn load_shard(path: &std::path::Path) -> std::io::Result<Self> {
+    pub fn load_shard(path: &std::path::Path) -> std::io::Result<Self> {
         let b = std::fs::read(path)?;
         let n = u64::from_le_bytes(b[0..8].try_into().unwrap()) as usize;
         let nd = b[8] as usize;
