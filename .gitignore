@@ -1,3 +1,7 @@
 /target
 /ppo
 /ppo_large
+# Generated label sets and run logs: data, not source.
+labels_full/
+labels_full_heur/
+runs/
