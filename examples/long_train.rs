@@ -24,7 +24,17 @@ fn depth1() -> Minimaxer<ScoreEvaluator> {
 }
 
 /// Greedy play on deals neither training nor the in-loop eval ever sees.
-fn holdout(ppo: &PPOMoveSelector<B>, seat: usize, games: u64) -> (f32, f32, f32) {
+///
+/// Takes the model on the INNER backend. This is inference, so there is nothing
+/// for an autodiff graph to be used for, and `examples/holdout.rs` has always
+/// run the same measurement on plain `NdArray`. Running it under `Autodiff`
+/// instead allocates graph bookkeeping for every one of ~18,000 forward passes
+/// (600 games x ~30 moves) at the very end of a long run, and this phase has now
+/// been OOM-killed twice within a minute of the training loop finishing. Whether
+/// that is the whole cause is unproven -- the box was also under load from other
+/// sessions both times -- but there is no reason to pay for autodiff here either
+/// way.
+fn holdout(ppo: &PPOMoveSelector<NdArray>, seat: usize, games: u64) -> (f32, f32, f32) {
     let mut opponent = depth1();
     let (mut wins, mut us, mut them) = (0u32, 0u32, 0u32);
     for seed in 9_000_000..9_000_000 + games {
@@ -79,7 +89,7 @@ fn main() {
         }
         None => PPOMoveSelector::<B>::new(config, &device),
     };
-    let (trained, summary) = PPOTrainer::new(ppo, Box::new(depth1()), &device)
+    let (_trained, summary) = PPOTrainer::new(ppo, Box::new(depth1()), &device)
         .with_options(TrainOptions {
             dir: dir.clone(),
             eval_every: 5,
@@ -108,7 +118,10 @@ fn main() {
 
     println!("SUMMARY {summary:?}");
     // The saved best, not whatever was current when the clock ran out.
-    let best = PPOMoveSelector::<B>::from_checkpoint(&dir, "best", &device).unwrap_or(trained);
+    // Reload on the inner backend for the final measurement; `valid()` would
+    // also work, but reloading keeps this identical to what `holdout.rs` scores.
+    let best = PPOMoveSelector::<NdArray>::from_checkpoint(&dir, "best", &device)
+        .expect("saved best checkpoint should load for the final holdout");
     let (w0, u0, t0) = holdout(&best, 0, 300);
     let (w1, u1, t1) = holdout(&best, 1, 300);
     println!("FINAL hidden={hidden} layers={layers} episodes={} | seat0 {w0:.1}% {u0:.1}v{t0:.1} | seat1 {w1:.1}% {u1:.1}v{t1:.1}",

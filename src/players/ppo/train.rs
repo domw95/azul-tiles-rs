@@ -384,6 +384,9 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
         // Deliberately separate from `best_smoothed` below, which drives the
         // patience check and must keep its own update order.
         let mut best_saved_smooth = f32::NEG_INFINITY;
+        // Smoothed win rate, same horizon as the smoothed margin, used for the
+        // target test so a single lucky eval cannot end a run.
+        let mut smooth_win = f32::NAN;
         let mut smoothed: Option<f32> = None;
         let mut best_smoothed = f32::NEG_INFINITY;
         let mut best_smoothed_episode = 0;
@@ -493,6 +496,13 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                 }
             };
             smoothed = Some(smooth);
+            // Same EMA horizon for the win rate, so the target test below is
+            // comparably stable.
+            smooth_win = if smooth_win.is_nan() {
+                eval.win_rate
+            } else {
+                options.stop.smoothing * eval.win_rate + (1.0 - options.stop.smoothing) * smooth_win
+            };
 
             println!(
                 "episode {episode}: {} states | lr {lr:.2e} | ev {ev:+.2} | eval win {:.0}% margin {:+.1} (avg {:+.1}) score {:.1}",
@@ -571,7 +581,15 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
                 best_smoothed_episode = episode;
             }
 
-            if eval.win_rate >= options.stop.target_win_rate {
+            // Test the SMOOTHED win rate, not a single eval. The in-loop eval
+            // plays 40 games, so its win rate has a standard error of about 8
+            // points; a run of 2,400 episodes draws ~480 of them, and at a true
+            // 65% the maximum of that many draws crosses 90% essentially
+            // always. Testing the raw value therefore stops a run on noise
+            // rather than on merit -- it ended a 12-hour run at episode 2,391
+            // on one eval reading 36/40, discarding six hours of budget while
+            // the smoothed margin was still climbing.
+            if smooth_win >= options.stop.target_win_rate {
                 reason = StopReason::TargetReached;
                 break;
             }
