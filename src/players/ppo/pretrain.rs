@@ -5,11 +5,15 @@
 //! single position, densely and exactly, which removes credit assignment,
 //! reward shaping, advantage variance and the critic from the problem at once.
 
+use burn::module::AutodiffModule as _;
 use burn::optim::{AdamConfig, GradientsParams, Optimizer};
 use burn::tensor::activation::log_softmax;
 use burn::tensor::backend::AutodiffBackend;
 use burn::tensor::cast::ToElement as _;
 use burn::tensor::{Int, Tensor, TensorData};
+
+use rand::seq::SliceRandom as _;
+use rand::SeedableRng as _;
 
 use crate::gamestate::{Gamestate, Move};
 use crate::players::nn::{gs_to_array_ordered, FactoryOrder};
@@ -511,31 +515,34 @@ pub fn behaviour_clone<B: AutodiffBackend>(
     let n = data.len() * 9 / 10;
     let val = data.len() - n;
 
+    // Shuffle the training order every epoch. Rows are appended ply by ply as
+    // each game is played, so a contiguous batch of 256 is ~5 games rather than
+    // 256 independent positions: neighbouring rows differ by one move and carry
+    // almost the same gradient. Unshuffled, the effective batch is a fraction of
+    // the nominal one and the identical batches recur in the identical order
+    // every epoch. Only the training range is permuted -- validation stays the
+    // untouched tail, so no game straddles the split.
+    let mut order: Vec<usize> = (0..n).collect();
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xC10E_5EED);
+
     for epoch in 0..stop.max_epochs {
         epochs_run = epoch + 1;
+        order.shuffle(&mut rng);
         let (mut total, mut batches, mut correct) = (0.0f32, 0usize, 0usize);
-        for start in (0..n).step_by(batch_size) {
-            let end = (start + batch_size).min(n);
-            let b = end - start;
+        for chunk in order.chunks(batch_size) {
+            let b = chunk.len();
+            let mut sb = Vec::with_capacity(b * STATE_SIZE);
+            let mut mb = Vec::with_capacity(b * ACTION_SIZE);
+            let mut tb = Vec::with_capacity(b);
+            for &i in chunk {
+                sb.extend_from_slice(&data.states[i * STATE_SIZE..(i + 1) * STATE_SIZE]);
+                mb.extend_from_slice(&data.masks[i * ACTION_SIZE..(i + 1) * ACTION_SIZE]);
+                tb.push(data.targets[i]);
+            }
 
-            let states = Tensor::<B, 2>::from_data(
-                TensorData::new(
-                    data.states[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
-                    [b, STATE_SIZE],
-                ),
-                device,
-            );
-            let masks = Tensor::<B, 2>::from_data(
-                TensorData::new(
-                    data.masks[start * ACTION_SIZE..end * ACTION_SIZE].to_vec(),
-                    [b, ACTION_SIZE],
-                ),
-                device,
-            );
-            let targets = Tensor::<B, 2, Int>::from_data(
-                TensorData::new(data.targets[start..end].to_vec(), [b, 1]),
-                device,
-            );
+            let states = Tensor::<B, 2>::from_data(TensorData::new(sb, [b, STATE_SIZE]), device);
+            let masks = Tensor::<B, 2>::from_data(TensorData::new(mb, [b, ACTION_SIZE]), device);
+            let targets = Tensor::<B, 2, Int>::from_data(TensorData::new(tb, [b, 1]), device);
 
             let log_probs = log_softmax(ppo.policy.action(states) + masks, 1);
             // Negative log likelihood of the teacher's move.
@@ -557,30 +564,37 @@ pub fn behaviour_clone<B: AutodiffBackend>(
             let params = GradientsParams::from_grads(grads, &ppo.policy);
             ppo.policy = optimiser.step(learning_rate, ppo.policy, params);
         }
-        // Validation agreement, no gradient.
+        // Validation agreement, no gradient -- and deliberately on the INNER
+        // backend. A forward pass on the autodiff backend builds a graph that
+        // only `backward()` consumes, and validation never calls it, so every
+        // batch's graph is retained until the pass ends. The cost scales with
+        // the validation set: measured elsewhere at 5,475 MiB against 127 MiB
+        // over 4.17M positions, accrued during a phase that looks idle from
+        // outside. `valid()` gives a graph-free copy of the module.
+        let eval_policy = ppo.policy.valid();
         let mut val_correct = 0usize;
         for start in (n..n + val).step_by(batch_size) {
             let end = (start + batch_size).min(n + val);
             let b = end - start;
-            let states = Tensor::<B, 2>::from_data(
+            let states = Tensor::<B::InnerBackend, 2>::from_data(
                 TensorData::new(
                     data.states[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
                     [b, STATE_SIZE],
                 ),
                 device,
             );
-            let masks = Tensor::<B, 2>::from_data(
+            let masks = Tensor::<B::InnerBackend, 2>::from_data(
                 TensorData::new(
                     data.masks[start * ACTION_SIZE..end * ACTION_SIZE].to_vec(),
                     [b, ACTION_SIZE],
                 ),
                 device,
             );
-            let targets = Tensor::<B, 2, Int>::from_data(
+            let targets = Tensor::<B::InnerBackend, 2, Int>::from_data(
                 TensorData::new(data.targets[start..end].to_vec(), [b, 1]),
                 device,
             );
-            let lp = log_softmax(ppo.policy.action(states) + masks, 1);
+            let lp = log_softmax(eval_policy.action(states) + masks, 1);
             val_correct += lp
                 .argmax(1)
                 .equal(targets)
