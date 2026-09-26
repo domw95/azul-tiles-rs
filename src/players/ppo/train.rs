@@ -390,6 +390,17 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
         let mut smoothed: Option<f32> = None;
         let mut best_smoothed = f32::NEG_INFINITY;
         let mut best_smoothed_episode = 0;
+        // Evals seen, so the smoothed series can warm up before anything acts on
+        // it. An EMA seeded from its first sample IS that sample, so at eval 1
+        // "smoothed" is a single 40-game draw wearing a smoothed label. A lucky
+        // first draw then sets a high-water mark the genuinely smoothed series
+        // may never beat, so nothing is ever saved and the plateau clock runs
+        // from episode 0. That cost a 5-hour continuation, which stopped as
+        // Plateaued with its best at episode 0 after 2,001 episodes.
+        let mut evals_seen = 0usize;
+        // 1/smoothing is the EMA's rough horizon; wait that long before the
+        // series is treated as a measurement.
+        let warmup = (1.0 / options.stop.smoothing.max(0.01)).ceil() as usize;
         let started = std::time::Instant::now();
         let mut episodes_run = 0;
         let mut last_ev = f32::NAN;
@@ -548,7 +559,10 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             // dominated by luck -- a lucky early eval can otherwise block every
             // later save, and a run improves for thousands of episodes with
             // nothing written to disk.
-            if smooth > best_saved_smooth {
+            evals_seen += 1;
+            let warm = evals_seen >= warmup;
+
+            if warm && smooth > best_saved_smooth {
                 best_saved_smooth = smooth;
                 best = eval;
                 best_episode = episode;
@@ -576,7 +590,7 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             if episode % 100 == 0 {
                 ppo.save(&options.dir, "last").unwrap();
             }
-            if smooth > best_smoothed {
+            if warm && (smooth > best_smoothed || best_smoothed == f32::NEG_INFINITY) {
                 best_smoothed = smooth;
                 best_smoothed_episode = episode;
             }
@@ -589,7 +603,7 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             // rather than on merit -- it ended a 12-hour run at episode 2,391
             // on one eval reading 36/40, discarding six hours of budget while
             // the smoothed margin was still climbing.
-            if smooth_win >= options.stop.target_win_rate {
+            if warm && smooth_win >= options.stop.target_win_rate {
                 reason = StopReason::TargetReached;
                 break;
             }
