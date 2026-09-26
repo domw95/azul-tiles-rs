@@ -19,6 +19,18 @@ encoded with the 321-float encoder, depth-2 labels used for cloning.
 `320x1` fine-tuned scores 47.1 v 40.4 on average. Reproduce with
 `holdout <dir> 1000` under `AZUL_DEPTH=2`.
 
+## How to read these numbers
+
+**Every measurement here carries the regime it was taken in.** Three conclusions
+on this project were later found to be scoped rather than general — a capacity
+sweep measured at 307k positions, a seat default measured at 7-17% win rates, a
+tie hypothesis measured on 237 positions. None was wrong when taken; each was
+carried forward without its conditions attached, and a bare number reads as
+general. So: model strength, epoch-selection rule, which teacher, and what the
+metric counts belong next to the figure, not in a paragraph elsewhere.
+
+Two entries below are **provisional** for that reason, and say so inline.
+
 ## Read this first: 300 games cannot resolve these differences
 
 `holdout` defaults to 300 games per seat. At these win rates that is **±2.8
@@ -78,6 +90,19 @@ Two consequences:
 
 ## Capacity, cloning: the peak is ~180k parameters
 
+> **PROVISIONAL.** Every number in this section was measured with a
+> `behaviour_clone` that never shuffled its training order (fixed in e95451a).
+> Rows arrive ply by ply, so a contiguous 256-row batch spanned ~5 games rather
+> than 256 independent positions, and identical batches recurred in identical
+> order every epoch. Re-measure before relying on the peak location.
+>
+> **Regime:** batch 256, lr 1e-3, depth-2 labels, 2.13M positions / 40,000
+> games, validation = tail 10%, `train` column = train agreement **at the
+> best-validation epoch**, not at convergence. That last point matters: large
+> nets peak on validation by epoch 6-8, so their `train` figure is six epochs
+> in, and reading it as a fitting ceiling is wrong — 2048x2 reaches train 65.7%
+> by epoch 18 and 1024x2 reaches 77.4%, both still rising.
+
 `examples/bc_sweep.rs`, batch 256, lr 1e-3, every cell run to its own
 validation plateau (patience 12, min_delta 0.02pp) rather than a fixed epoch
 budget. Validation agreement over the held-out 10% (~213k positions):
@@ -97,7 +122,13 @@ budget. Validation agreement over the held-out 10% (~213k positions):
 | 2048x2 | 9,420,980 | 57.82 | 54.17 | 3.65 | 6 | 33.3% |
 
 **The train/val gap rises monotonically with size** — 0.40, 1.16, 2.54, 3.29,
-3.68, 4.44 — so the data constrains the model, not the reverse. Larger nets
+3.68, 4.44 — which says the nets overfit rather than underfit, and is consistent
+with data being the binding constraint. Consistent with, not proof of: the gap
+alone cannot distinguish "more data would help" from "the target is only
+partly predictable from this encoding", and validation sits ~30 points below the
+~86.5% learnable ceiling measured below. A learning curve over dataset fraction
+(`examples/learning_curve.rs`, fixed validation set, fractions sampled by whole
+game) is the direct test and is not yet run. Larger nets
 peak earlier and then decay for as long as they are allowed to run (2048x2 at
 epoch 6, 160x1 at epoch 133), which is why a fixed epoch budget mismeasures
 them: at a 22-epoch cap, 160x1 records ~54% and looks too small when it is
@@ -107,6 +138,32 @@ Capacity was never the limit on *fitting*: 1024x2 reached train 71.4% while its
 validation fell to 53.3%. Lowering its learning rate to 3e-4 gained 0.7 points
 of validation but made it memorise faster, so the falling-validation signature
 is genuine overfitting and not an untuned step size.
+
+## What is learnable from a depth-2 teacher
+
+Measured independently by the exhaustive-search generator (azul-eval-ce), 237
+exact positions from 5 games — small sample, positions within a game correlated,
+so intervals are wider than binomial:
+
+| depth | agrees with exact | mean value lost per decision |
+|---|---|---|
+| 1 | 40.1% | 1.565 |
+| 2 | 48.5% | 1.329 |
+| 3 | 55.3% | 1.059 |
+| 4 | 60.3% | 0.949 |
+| 6 | 75.5% | 0.574 |
+
+**Learnable ceiling against depth-2 targets: ~86.5%** — 25% of positions carry a
+tie at depth 2's own top value, and a net that ranks perfectly still scores 1/k
+on those. So the 56-57% validation agreement above is ~30 points below what is
+learnable, and ties do not explain it. (This figure excludes positions that hit
+the node budget, which are the large-tree ones and plausibly carry more
+near-equal moves, so it is biased slightly upward.)
+
+Note this bounds *imitability*, not quality: **depth 2 concedes 1.329 points of
+value per decision** against a solved round, over ~50 decisions a game. A net
+can imitate it faithfully and still inherit a policy that gives away real value,
+which is consistent with fine-tuning being where the strength comes from.
 
 ## Capacity, fine-tuning: the peak moves, but only a little
 
@@ -155,6 +212,37 @@ still lost by 9.3 points.
 Depth costs clone *strength* too (~3.3pp at both widths) while barely touching
 agreement — neutral at 240, -0.35 at 320 — so no amount of clone-side sweeping
 would have found it. It only shows up by playing games.
+
+## The trainer specialises to seat 0
+
+`TrainOptions::default()` uses `SeatMode::First` — "always seat 0, always moving
+first" — and it shows, at 1000 games/seat:
+
+| model | seat 0 | seat 1 | gap |
+|---|---|---|---|
+| clone 320x1 | 36.7 | 38.5 | -1.8 |
+| clone 2048x2 | 30.3 | 36.2 | -5.9 |
+| ft_320x1 | 66.8 | 63.7 | **+3.1** |
+| ft_240x1 | 62.8 | 57.5 | **+5.3** |
+| ft_160x1 | 62.2 | 57.8 | **+4.4** |
+
+Clones carry a seat-0 *disadvantage* of about the size the game's own asymmetry
+predicts (`mm_vs_mm` depth2-vs-depth2: seat0 margin -1.50). Fine-tuning flips
+the sign, so PPO adds a seat-0 advantage of its own — a +6 to +10 point swing.
+The cause is visitation, not coverage: the encoding is mover-relative and the
+seat index is never encoded, so the labels cover both seats' position classes
+(verified — the opening position is bit-identical between seat views), but an
+agent that only ever occupies seat 0 only ever visits seat-0-reachable states.
+
+The default's in-code justification cites `Immediate + First` 17% against
+`Immediate + Alternate` 7%. **Regime: those were measured at 7-17% win rates**,
+where splitting a scarce episode budget across seats is clearly bad. At 65% it
+is not clearly bad, and "transfers to seat 1 on its own" was a 2-point leak on a
+weak model against 3-5 points on a strong one.
+
+All comparisons in this document used `SeatMode::First`, so rankings are
+unaffected; the absolute numbers leave roughly 1.5-2.5 points of mean win rate
+unclaimed. `SeatMode::Alternate` is a one-line change.
 
 ## Reproducing
 
