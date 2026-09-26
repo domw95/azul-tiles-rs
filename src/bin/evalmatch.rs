@@ -20,15 +20,15 @@ use minimaxer::negamax::SearchOptions;
 #[derive(Clone, Copy)]
 struct Budget {
     depth: u8,
-    time_ms: u64,
+    time_us: u64,
 }
 
 fn opts(b: Budget) -> SearchOptions {
-    if b.time_ms > 0 {
+    if b.time_us > 0 {
         SearchOptions {
             iterative: true,
             alpha_beta: true,
-            max_time: Some(std::time::Duration::from_millis(b.time_ms)),
+            max_time: Some(std::time::Duration::from_micros(b.time_us)),
             ..Default::default()
         }
     } else {
@@ -49,10 +49,10 @@ struct GameStats {
     searches: [u64; 2],
 }
 
-fn play(seed: u64, first_player: u8, weights: [Weights; 2], budget: Budget) -> GameStats {
+fn play(seed: u64, first_player: u8, weights: [Weights; 2], budgets: [Budget; 2]) -> GameStats {
     let mut players = [
-        Minimaxer::new(opts(budget), "a", HeuristicEvaluator::new(weights[0])),
-        Minimaxer::new(opts(budget), "b", HeuristicEvaluator::new(weights[1])),
+        Minimaxer::new(opts(budgets[0]), "a", HeuristicEvaluator::new(weights[0])),
+        Minimaxer::new(opts(budgets[1]), "b", HeuristicEvaluator::new(weights[1])),
     ];
     let mut gs = Gamestate::<2, 6>::new_2_player_with_seed(seed, first_player);
     loop {
@@ -72,7 +72,24 @@ fn play(seed: u64, first_player: u8, weights: [Weights; 2], budget: Budget) -> G
     }
 }
 
-fn matchup(name: &str, challenger: Weights, baseline: Weights, pairs: usize, budget: Budget) {
+fn matchup(
+    name: &str,
+    challenger: Weights,
+    baseline: Weights,
+    pairs: usize,
+    budget: Budget,
+) {
+    matchup_handicap(name, challenger, baseline, pairs, [budget, budget]);
+}
+
+/// As [`matchup`], but each side gets its own budget, so one can be handicapped.
+fn matchup_handicap(
+    name: &str,
+    challenger: Weights,
+    baseline: Weights,
+    pairs: usize,
+    budgets: [Budget; 2],
+) {
     let (mut wins, mut draws, mut losses) = (0u32, 0u32, 0u32);
     let mut margin_total = 0i64;
     let mut margin_sq = 0i64;
@@ -91,7 +108,12 @@ fn matchup(name: &str, challenger: Weights, baseline: Weights, pairs: usize, bud
                 } else {
                     [baseline, challenger]
                 };
-                let g = play(seed, first, w, budget);
+                let bud = if seat == 0 {
+                    [budgets[0], budgets[1]]
+                } else {
+                    [budgets[1], budgets[0]]
+                };
+                let g = play(seed, first, w, bud);
                 let margin = if seat == 0 { g.margin } else { -g.margin };
                 // Index 0 is always the challenger, whichever seat it took.
                 let c = seat;
@@ -130,7 +152,7 @@ fn matchup(name: &str, challenger: Weights, baseline: Weights, pairs: usize, bud
         mean_margin,
         1.96 * margin_se,
     );
-    if budget.time_ms > 0 {
+    if budgets[0].time_us > 0 {
         let per = |i: usize| {
             (
                 nodes[i] as f64 / searches[i] as f64,
@@ -147,43 +169,120 @@ fn matchup(name: &str, challenger: Weights, baseline: Weights, pairs: usize, bud
     }
 }
 
+/// Measure what a node deficit is worth in win rate.
+///
+/// The obvious experiment, handicapping one side by the ~10% a real feature
+/// costs, is not affordable: theory puts that at roughly a point of win rate,
+/// and resolving a point needs on the order of ten thousand games. So measure
+/// where the signal is strong, at large handicaps, and interpolate down.
+///
+/// Strength is roughly linear in log time, so the fit is over log2 of the
+/// achieved node ratio rather than the ratio itself. The achieved ratio is what
+/// gets reported and fitted, not the nominal one: iterative deepening is a
+/// staircase, and a side given 15% less clock may well search the same depth
+/// and give up nothing.
+fn calibrate(pairs: usize, base_us: u64) {
+    let w = Weights::default();
+    let base = Budget { depth: 0, time_us: base_us };
+    println!(
+        "calibration: identical evaluators, one side handicapped\n\
+         base {:.2}ms per move, {} games per level\n",
+        base_us as f64 / 1000.0,
+        pairs * 4
+    );
+    // 1.0 is the null control and anchors the fit at 50%.
+    for frac in [1.0, 0.85, 0.7, 0.5] {
+        let handicapped = Budget {
+            depth: 0,
+            time_us: (base_us as f64 * frac).round() as u64,
+        };
+        matchup_handicap(
+            &format!("handicap {frac:.2}"),
+            w,
+            w,
+            pairs,
+            [handicapped, base],
+        );
+    }
+    println!(
+        "\nfit points-per-log2(node ratio) from the rows above; a feature whose\n\
+         node ratio is r can then be expected to lose that rate * -log2(r)\n\
+         points from its fixed depth margin."
+    );
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    let pairs: usize = args.get(1).and_then(|s| s.parse().ok()).unwrap_or(250);
-    let depth: u8 = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(2);
-    let time_ms: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(0);
-    let budget = Budget { depth, time_ms };
+    let mode = args.get(1).map(|s| s.as_str()).unwrap_or("screen");
+    let pairs: usize = args.get(2).and_then(|s| s.parse().ok()).unwrap_or(200);
 
-    let fitted: Weights = serde_json::from_reader(
-        std::fs::File::open("eval_weights.json").expect("run the tune binary first"),
-    )
-    .unwrap();
-    // The default has the forecast term off, so it is the cheap side of the
-    // ablation. HeuristicEvaluator::new sees the zeros and skips the work, so
-    // this really is the cheaper evaluator and not just a muted one.
-    let no_forecast = Weights::default();
-    let forecast_on = no_forecast.with_ts_forecast();
+    if mode == "calibrate" {
+        let base_ms: f64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(5.0);
+        calibrate(pairs, (base_ms * 1000.0).round() as u64);
+        return;
+    }
+
+    // A probe runs only the null control and the candidate, for when the full
+    // set is too dear: depth 5 costs roughly sixteen times depth 3.
+    let probe = mode == "probe";
+    let budget = if mode == "timed" || (probe && args.get(4).map_or(false, |v| v != "0")) {
+        let idx = if probe { 4 } else { 3 };
+        let ms: f64 = args.get(idx).and_then(|s| s.parse().ok()).unwrap_or(5.0);
+        Budget { depth: 0, time_us: (ms * 1000.0).round() as u64 }
+    } else {
+        // Screen at the depth the timed test actually reaches, otherwise the
+        // screen and the confirmation differ in depth as well as in cost and
+        // neither tells you which one moved the result.
+        let depth: u8 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(3);
+        Budget { depth, time_us: 0 }
+    };
+
+    let default = Weights::default();
+    let hand_set = Weights::hand_set();
     let mut score_only = Weights([0.0; N_FEATURES]);
     score_only.0[0] = 1.0;
+    // A freshly fitted vector, if one has been written, measured against
+    // whatever currently ships. This is the comparison that decides the default.
+    let candidate: Option<Weights> = std::fs::File::open("eval_weights.json")
+        .ok()
+        .and_then(|f| serde_json::from_reader(f).ok())
+        .filter(|c: &Weights| *c != default);
 
-    if time_ms > 0 {
-        println!("{time_ms}ms per move, {} games per matchup\n", pairs * 4);
+    if budget.time_us > 0 {
+        println!("{:.2}ms per move, {} games per matchup\n", budget.time_us as f64 / 1000.0, pairs * 4);
     } else {
-        println!("depth {depth}, {} games per matchup\n", pairs * 4);
+        println!("depth {}, {} games per matchup\n", budget.depth, pairs * 4);
     }
 
     // Identical weights both sides must read 50%. This detects asymmetry, which
     // is the class the one sided wall term belonged to. It cannot detect load
     // biasing a comparison between evaluators of different cost, because it is
     // symmetric by construction and that comparison is not: see the nodes/move
-    // ratio for that.
-    matchup("null control", no_forecast, no_forecast, pairs, budget);
-    matchup("forecast on vs off", forecast_on, no_forecast, pairs, budget);
-    if time_ms > 0 {
+    // ratio for that, and the calibrate mode for what a ratio costs.
+    matchup("null control", default, default, pairs, budget);
+    if probe {
+        match &candidate {
+            Some(c) => matchup("candidate vs default", *c, default, pairs, budget),
+            None => println!("no distinct eval_weights.json to probe"),
+        }
         return;
     }
-    matchup("no forecast vs score only", no_forecast, score_only, pairs, budget);
-    matchup("fitted vs score only", fitted, score_only, pairs, budget);
-    matchup("fitted vs default", fitted, no_forecast, pairs, budget);
-    matchup("forecast on vs score only", forecast_on, score_only, pairs, budget);
+    matchup("default vs hand set", default, hand_set, pairs, budget);
+    matchup("default vs score only", default, score_only, pairs, budget);
+    matchup("default-no-forecast vs default", default.without_forecast(), default, pairs, budget);
+
+    if let Some(c) = candidate {
+        matchup("eval_weights.json vs default", c, default, pairs, budget);
+    } else {
+        println!("no distinct eval_weights.json to compare");
+    }
+
+    if budget.time_us > 0 {
+        // Timed runs cost ~10x a screen and have a +/-5 run to run spread on
+        // this machine, so under a clock we ask only the decisive questions.
+        return;
+    }
+    matchup("hand set vs score only", hand_set, score_only, pairs, budget);
+    matchup("ts-forecast vs default", hand_set.with_ts_forecast(), default, pairs, budget);
+
 }
