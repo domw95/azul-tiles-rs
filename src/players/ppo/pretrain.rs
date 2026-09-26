@@ -596,7 +596,11 @@ pub fn pretrain_value<B: AutodiffBackend>(
     }
     // Return the best, not the last.
     ppo.value = best_value;
-    (ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early })
+    // NaN rather than 0.0: value pretraining is regression and has no training
+    // *agreement* to report. Zero would read as "fitted nothing" in a printed
+    // summary and could be averaged into something by accident; NaN says not
+    // applicable and makes any such arithmetic visibly wrong.
+    (ppo, CloneSummary { epochs_run, best_epoch, best_val, best_train: f32::NAN, stopped_early })
 }
 
 /// When to stop cloning.
@@ -629,6 +633,12 @@ pub struct CloneSummary {
     pub best_val: f32,
     /// Training agreement in the same epoch as `best_val`. The gap between
     /// the two is what says whether a net is too small or is memorising.
+    ///
+    /// **NaN when returned by `pretrain_value`**, which fits a regression and has
+    /// no agreement to report. Note that `best_val` also changes meaning between
+    /// the two producers -- an agreement fraction from cloning, a loss from value
+    /// pretraining -- so the two summaries are not comparable and should not
+    /// share a table.
     pub best_train: f32,
     pub stopped_early: bool,
 }
