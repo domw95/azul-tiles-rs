@@ -212,6 +212,16 @@ impl<B: Backend> PPOMoveSelector<B> {
         self.value.value(state)
     }
 
+    /// The critic over a batch of states, `[rows, STATE_SIZE]` in and
+    /// `[rows, 1]` out.
+    ///
+    /// The head is the same one [`Self::value`] runs; what differs is that the
+    /// fixed per-call costs are paid once for the whole batch rather than once
+    /// per row, which at these widths is most of the cost.
+    pub fn value_batched(&self, states: Tensor<B, 2>) -> Tensor<B, 2> {
+        self.value.value(states)
+    }
+
     /// Run the policy for `gamestate`, returning the encoded state, the action
     /// mask, and the masked log probabilities over the action space.
     fn policy_log_probs(

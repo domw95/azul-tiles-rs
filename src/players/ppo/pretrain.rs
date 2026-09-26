@@ -16,6 +16,15 @@ use crate::players::nn::{gs_to_array_ordered, FactoryOrder};
 
 use super::{PPOMoveSelector, ACTION_SIZE, STATE_SIZE};
 
+/// Points per unit of network output.
+///
+/// The critic is trained on scores divided by this, because reinforcement
+/// learning's rewards are scaled the same way and the two have to be
+/// commensurate. Anything reading a value back out -- a search evaluator, say
+/// -- has to multiply by it again, so the number lives here rather than being
+/// written `10.0` at each end and drifting apart silently.
+pub const VALUE_SCALE: f32 = 10.0;
+
 /// Positions labelled with the move a teacher chose.
 #[derive(Default, Debug)]
 pub struct Dataset {
@@ -309,8 +318,12 @@ impl MultiDataset {
         Ok(Self { states, masks, depths, targets, values })
     }
 
-    /// Load every shard in `dir` whose name starts with `prefix`.
-    pub fn load_dir(dir: &std::path::Path, prefix: &str) -> std::io::Result<Self> {
+    /// Every shard in `dir` named `prefix*`, in the order the loaders read
+    /// them.
+    fn shard_paths(
+        dir: &std::path::Path,
+        prefix: &str,
+    ) -> std::io::Result<Vec<std::path::PathBuf>> {
         let mut paths: Vec<_> = std::fs::read_dir(dir)?
             .filter_map(|e| e.ok().map(|e| e.path()))
             .filter(|p| {
@@ -320,6 +333,12 @@ impl MultiDataset {
             })
             .collect();
         paths.sort();
+        Ok(paths)
+    }
+
+    /// Load every shard in `dir` whose name starts with `prefix`.
+    pub fn load_dir(dir: &std::path::Path, prefix: &str) -> std::io::Result<Self> {
+        let paths = Self::shard_paths(dir, prefix)?;
         let mut out = Self::default();
         for p in paths {
             let s = Self::load_shard(&p)?;
@@ -338,6 +357,75 @@ impl MultiDataset {
         Ok(out)
     }
 
+    /// Load only what fitting a critic needs: the encoded states, and one
+    /// depth's root values.
+    ///
+    /// [`Self::load_dir`] also brings in the action masks and the move
+    /// targets, which a value fit never looks at. On the 2.1M position set
+    /// that is 1.5 GB of masks held for nothing, and the peak matters more
+    /// than the steady state: this box has no swap and has OOM-killed work
+    /// that merely spiked on the way in.
+    ///
+    /// So the shard headers are read first and the buffers allocated once at
+    /// their final size. Growing them by `extend` transiently needs about
+    /// three times the final size at the last reallocation, which is the
+    /// difference between fitting and not.
+    pub fn load_dir_values(
+        dir: &std::path::Path,
+        prefix: &str,
+        depth: u8,
+    ) -> std::io::Result<(Vec<f32>, Vec<f32>)> {
+        use std::io::{Read, Seek};
+
+        let paths = Self::shard_paths(dir, prefix)?;
+        let mut counts = Vec::with_capacity(paths.len());
+        let mut total = 0usize;
+        for path in &paths {
+            let mut head = [0u8; 9];
+            std::fs::File::open(path)?.read_exact(&mut head)?;
+            let n = u64::from_le_bytes(head[0..8].try_into().unwrap()) as usize;
+            counts.push(n);
+            total += n;
+        }
+
+        let mut states = Vec::with_capacity(total * STATE_SIZE);
+        let mut values = Vec::with_capacity(total);
+        let mut buf = Vec::new();
+        for (path, n) in paths.iter().zip(counts) {
+            let mut f = std::fs::File::open(path)?;
+            let mut head = [0u8; 9];
+            f.read_exact(&mut head)?;
+            let nd = head[8] as usize;
+            let mut depths = vec![0u8; nd];
+            f.read_exact(&mut depths)?;
+            let Some(d) = depths.iter().position(|&x| x == depth) else {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("{}: no depth {depth} in {depths:?}", path.display()),
+                ));
+            };
+
+            buf.resize(n * STATE_SIZE * 4, 0);
+            f.read_exact(&mut buf)?;
+            states.extend(
+                buf.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())),
+            );
+
+            // Past the masks, then past every earlier depth's targets and
+            // values, then past this depth's targets.
+            let skip = (n * ACTION_SIZE * 4) + (d * n * 8) + (n * 4);
+            f.seek(std::io::SeekFrom::Current(skip as i64))?;
+            buf.resize(n * 4, 0);
+            f.read_exact(&mut buf)?;
+            values.extend(
+                buf.chunks_exact(4)
+                    .map(|c| f32::from_le_bytes(c.try_into().unwrap())),
+            );
+        }
+        Ok((states, values))
+    }
+
     /// Borrow the labels for one depth.
     ///
     /// A view, not a copy: at 2.1M positions the states and masks are several
@@ -354,48 +442,78 @@ impl MultiDataset {
 }
 
 
-/// Initialise the value head from a search's root evaluations.
+/// Fit the value head to a search's root evaluations.
 ///
-/// TODO: this still has the flaw `behaviour_clone` just lost -- a fixed epoch
-/// count and no best-model selection. Left alone because it is unused:
-/// initialising the critic from search values measured as a null (+0.94 on
-/// held-out search values, +0.01 transfer to RL returns).
+/// The root value a search returns is in the *root player's* frame, and the
+/// state is encoded from that same seat, so the two agree and the head learns
+/// "how far ahead is the side to move". [`crate::players::nn_eval::NnEvaluator`]
+/// is what reads it back out, and it is that evaluator which has to undo the
+/// seat convention, because `minimaxer::Evaluate` wants the first player's
+/// frame instead.
 ///
-/// Caveat on the target: reinforcement learning trains the critic to predict
-/// the *return*, the discounted sum of future per-move rewards, whereas a
-/// search returns the differential score as it stands now. Those are not the
-/// same quantity, so this is an initialisation rather than the real target --
-/// a head that already encodes "who is ahead here" is a far better starting
-/// point than noise, and fine-tuning adapts it. Values are scaled by the same
-/// /10 the reward uses, so the magnitudes are at least comparable.
+/// Caveat on using this for reinforcement learning specifically: RL trains the
+/// critic to predict the *return*, the discounted sum of future per-move
+/// rewards, whereas a search returns the differential score as it stands now.
+/// Those are not the same quantity, so as a critic initialisation this is a
+/// starting point rather than the target -- and it measured as a null in that
+/// role (+0.94 on held-out search values, +0.01 transfer to RL returns). As a
+/// search evaluator, which is what issue #3 is about, the quantity it predicts
+/// is exactly the right one.
+///
+/// Stopping is [`CloneStop`], shared with [`behaviour_clone`]; the metric it
+/// compares is validation explained variance rather than move agreement, both
+/// being "higher is better" on roughly the same scale. Returning the last
+/// epoch rather than the best was the flaw cloning had already lost, and it
+/// matters more here: mean squared error on a heavy-tailed target overfits
+/// visibly within a handful of epochs.
+///
+/// `on_best` is called with the model each time the held-out score improves,
+/// which is where a caller writes a checkpoint. An epoch over 2.1M positions
+/// takes minutes on a contended box, so a run that only saves when it returns
+/// can be hours of work with nothing on disk -- and the reason the run ends is
+/// as often a kill as a stopping rule. The same lesson the PPO loop learned
+/// from losing 1845 episodes.
 pub fn pretrain_value<B: AutodiffBackend>(
     mut ppo: PPOMoveSelector<B>,
-    data: DataView<'_>,
+    states_all: &[f32],
     values: &[f32],
-    epochs: usize,
+    stop: CloneStop,
     batch_size: usize,
     learning_rate: f64,
     device: &B::Device,
-) -> PPOMoveSelector<B> {
+    mut on_best: impl FnMut(&PPOMoveSelector<B>, usize, f32),
+) -> (PPOMoveSelector<B>, CloneSummary) {
     let mut optimiser = AdamConfig::new().init();
-    let n = data.len() * 9 / 10;
-    let val = data.len() - n;
+    let mut best_value = ppo.value.clone();
+    let mut best_val = f32::NEG_INFINITY;
+    let mut best_epoch = 0usize;
+    let mut epochs_run = 0usize;
+    let mut stopped_early = false;
+    // The split is positional, not shuffled, and deliberately so: the labels
+    // arrive in game order, so a random split would put positions from the
+    // same game on both sides and report a leak as generalisation.
+    let n = values.len() * 9 / 10;
+    let val = values.len() - n;
 
-    for epoch in 0..epochs {
+    for epoch in 0..stop.max_epochs {
+        epochs_run = epoch + 1;
         let (mut total, mut batches) = (0.0f32, 0usize);
         for start in (0..n).step_by(batch_size) {
             let end = (start + batch_size).min(n);
             let b = end - start;
             let states = Tensor::<B, 2>::from_data(
                 TensorData::new(
-                    data.states[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
+                    states_all[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
                     [b, STATE_SIZE],
                 ),
                 device,
             );
             let targets = Tensor::<B, 2>::from_data(
                 TensorData::new(
-                    values[start..end].iter().map(|v| v / 10.0).collect::<Vec<f32>>(),
+                    values[start..end]
+                        .iter()
+                        .map(|v| v / VALUE_SCALE)
+                        .collect::<Vec<f32>>(),
                     [b, 1],
                 ),
                 device,
@@ -422,7 +540,7 @@ pub fn pretrain_value<B: AutodiffBackend>(
             let b = end - start;
             let states = Tensor::<B, 2>::from_data(
                 TensorData::new(
-                    data.states[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
+                    states_all[start * STATE_SIZE..end * STATE_SIZE].to_vec(),
                     [b, STATE_SIZE],
                 ),
                 device,
@@ -434,7 +552,7 @@ pub fn pretrain_value<B: AutodiffBackend>(
                 .to_vec()
                 .unwrap();
             for (k, p) in preds.iter().enumerate() {
-                let t = values[start + k] / 10.0;
+                let t = values[start + k] / VALUE_SCALE;
                 se += ((t - p) as f64).powi(2);
                 sum += t as f64;
                 sq += (t as f64).powi(2);
@@ -442,13 +560,39 @@ pub fn pretrain_value<B: AutodiffBackend>(
         }
         let m = sum / val as f64;
         let var = sq / val as f64 - m * m;
+        let ev = (1.0 - (se / val as f64) / var.max(1e-9)) as f32;
+        let improved = ev > best_val + stop.min_delta;
+        if improved {
+            best_val = ev;
+            best_epoch = epoch;
+            best_value = ppo.value.clone();
+            // `ppo` is the best model at this instant, so hand it over before
+            // the next epoch moves it on.
+            on_best(&ppo, epoch, ev);
+        }
         println!(
-            "value epoch {epoch}: mse {:.4}, val explained variance {:+.3}",
+            "value epoch {epoch}: mse {:.4}, val explained variance {ev:+.3}{}",
             total / batches.max(1) as f32,
-            1.0 - (se / val as f64) / var.max(1e-9)
+            if improved { " *" } else { "" }
+        );
+        if epoch >= best_epoch + stop.patience {
+            println!(
+                "value stopped: no gain for {} epochs; best {best_val:+.3} at epoch {best_epoch}",
+                stop.patience
+            );
+            stopped_early = true;
+            break;
+        }
+    }
+
+    if !stopped_early {
+        println!(
+            "value hit the epoch cap at {epochs_run}; best {best_val:+.3} at epoch {best_epoch} -- raise max_epochs if that is near the end"
         );
     }
-    ppo
+    // Return the best, not the last.
+    ppo.value = best_value;
+    (ppo, CloneSummary { epochs_run, best_epoch, best_val, stopped_early })
 }
 
 /// When to stop cloning.

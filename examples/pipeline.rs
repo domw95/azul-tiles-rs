@@ -1,7 +1,9 @@
 #![recursion_limit = "512"]
 //! Clone a teacher from a multi-depth label set and initialise the critic.
 //! Args: <labels_dir> <depth> <out_dir> [policy_epochs] [value_epochs]
-use azul_tiles_rs::players::ppo::pretrain::{behaviour_clone, pretrain_value, CloneStop, MultiDataset};
+use azul_tiles_rs::players::ppo::pretrain::{
+    behaviour_clone, pretrain_value, CloneStop, MultiDataset,
+};
 use azul_tiles_rs::players::ppo::{PPOConfig, PPOMoveSelector};
 // Cloning is pure batched supervised training over a fixed dataset -- large
 // matmuls, no sequential dependency, no per-sample device syncs -- so unlike
@@ -43,7 +45,17 @@ fn main() {
         &device,
     );
     println!("clone: {summary:?}");
-    let ppo = pretrain_value(ppo, data, &multi.values[di], ve, 256, 0.001, &device);
+    let (ppo, value_summary) = pretrain_value(
+        ppo,
+        data.states,
+        &multi.values[di],
+        CloneStop { max_epochs: ve, ..Default::default() },
+        256,
+        0.001,
+        &device,
+        |_, _, _| {},
+    );
+    println!("value: {value_summary:?}");
 
     std::fs::create_dir_all(&out).unwrap();
     ppo.save(&out, "best").unwrap();

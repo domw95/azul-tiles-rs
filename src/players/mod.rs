@@ -7,6 +7,7 @@ use crate::gamestate::{Destination, Gamestate, Move};
 
 pub mod minimax;
 pub mod nn;
+pub mod nn_eval;
 pub mod ppo;
 
 /// Required implementation for a player
