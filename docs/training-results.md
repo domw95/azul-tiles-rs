@@ -27,14 +27,54 @@ encoded with the 321-float encoder, depth-2 labels used for cloning.
 
 ## Headline
 
-| model | depth-2 win rate |
-|---|---|
-| Best before this work | 43.4% |
-| Best clone alone (240x1) | 40.7% |
-| **Best fine-tuned (320x1)** | **65.3%** |
+| model | vs depth 2 | vs depth 3 |
+|---|---|---|
+| Best before this work | 43.4% | — |
+| Best clone alone (240x1) | 40.7% | — |
+| depth-2 search | 50% | 21.2% |
+| `ft_320x1`, 1,759 episodes | 65.3% | 43.3% |
+| `ext2`, ~4,785 episodes | ~74% | 52.3% |
+| **`ft_320x1_d3b`, ~7,004 episodes** | **77.0%** | **57.9%** |
+| depth-3 search | 78.8% | 50% |
 
-`320x1` fine-tuned scores 47.1 v 40.4 on average. Reproduce with
-`holdout <dir> 1000` under `AZUL_DEPTH=2`.
+The best model scores 52.0 v 39.4, a margin of +12.2 — the same margin depth-3
+*search* achieves against depth 2 — and it beats depth-3 search itself. Reproduce
+with `holdout <dir> 1000` under `AZUL_DEPTH=2`.
+
+**Training length is the lever.** Every architecture and opponent variation tested
+became a null once length was controlled; the three models above differ mainly in
+episodes. Two of the stop conditions were silently truncating runs (see the noisy
+maximum note below), which made this harder to see than it should have been.
+
+**Training against a stronger opponent is a null.** `d3b` trained against depth 3
+and leads `ext2` (depth 2, same lineage) by +1.94 margin points at depth 2 and
++2.18 at depth 3 — **flat**, where a genuinely better training signal should widen
+against harder opposition. It also carries 46% more episodes, which is enough to
+explain the whole difference. Beware the win-rate view of this same pair: the gap
+reads 3 points at depth 2 and 8 at depth 3, apparent confirmation, but that is
+`Phi(margin/15.6)` being steepest near 50% rather than a real widening.
+
+## The most repeated mistake here: a maximum over noisy draws
+
+Four instances in one day, all the same shape — a threshold or an argmax taken
+over many noisy samples and read as a measurement:
+
+1. **Checkpoint selection** compared single 40-game evals. One lucky +15.35 at
+   episode 110 locked out 1,845 further episodes with nothing written to disk.
+2. **The 0.90 win-rate target** compared a single eval. At ~480 evals per run and
+   ±8 points of standard error, crossing 90% is near-certain at a true 65%; it
+   ended a 12-hour run at episode 2,391.
+3. **A train-agreement column** read at the best-validation epoch was taken for
+   agreement at convergence, producing a confident and wrong underfitting
+   diagnosis.
+4. **The EMA introduced to fix 1 and 2** is seeded from its first sample, so at
+   eval 1 "smoothed" is one 40-game draw. A lucky first draw set a high-water mark
+   the smoothed series never beat: a 5-hour run stopped as `Plateaued` with
+   `best_episode: 0`.
+
+All four are fixed (e1ee756, dec43a2, 2dd3964). The general rule: any threshold
+tested repeatedly against a 40-game statistic will be crossed by noise, and
+smoothing only helps once it has samples to smooth.
 
 ## How to read these numbers
 
@@ -107,11 +147,14 @@ Two consequences:
 
 ## Capacity, cloning: the peak is ~180k parameters
 
-> **PROVISIONAL.** Every number in this section was measured with a
-> `behaviour_clone` that never shuffled its training order (fixed in e95451a).
-> Rows arrive ply by ply, so a contiguous 256-row batch spanned ~5 games rather
-> than 256 independent positions, and identical batches recurred in identical
-> order every epoch. Re-measure before relying on the peak location.
+> **PROVISIONAL, but quantified.** Every number in this section was measured
+> with a `behaviour_clone` that never shuffled its training order (fixed in
+> e95451a). Re-measured at 320x1 on the identical split, shuffling is worth
+> **+1.28 points** (56.41 -> 57.69), confirmed independently by the learning
+> curve's full-data cell on a different validation set (57.72). Training also
+> runs ~50% longer before plateauing (46 -> 70 epochs), consistent with more
+> diverse gradients. Only 320x1 has been re-measured, so the peak *location*
+> is still untested — though a level shift of this kind would not move it.
 >
 > **Regime:** batch 256, lr 1e-3, depth-2 labels, 2.13M positions / 40,000
 > games, validation = tail 10%, `train` column = train agreement **at the
@@ -236,6 +279,43 @@ still lost by 9.3 points.
 Depth costs clone *strength* too (~3.3pp at both widths) while barely touching
 agreement — neutral at 240, -0.35 at 320 — so no amount of clone-side sweeping
 would have found it. It only shows up by playing games.
+
+## Is the clone data-limited? Yes, at a known and slow exchange rate
+
+`examples/learning_curve.rs`, 320x1, fractions sampled by whole game against one
+**fixed** validation set of 4,000 games, shuffled loop:
+
+| fraction | games | positions | train | val | gap | epochs |
+|---|---|---|---|---|---|---|
+| 0.10 | 3,600 | 191,658 | 51.85 | 44.46 | 7.39 | 7 |
+| 0.25 | 9,000 | 478,982 | 57.95 | 49.35 | 8.60 | 14 |
+| 0.50 | 18,000 | 958,386 | 58.94 | 53.26 | 5.68 | 24 |
+| 0.75 | 27,000 | 1,437,262 | 60.92 | 55.88 | 5.05 | 53 |
+| 1.00 | 36,000 | 1,916,558 | 61.64 | **57.72** | 3.91 | 87 |
+
+**The curve does not flatten.** Slopes per doubling of games: 3.70, 3.91, 4.48,
+**4.39** — the top segment is as steep as the middle, so there is no data ceiling
+in sight.
+
+**But the exchange rate makes data a slow lever.** At +4.39 points per doubling,
+closing the 30.5-point gap to the 88.2% learnable ceiling needs **7 doublings —
+124x the current 36,000 games, about 4.5M of them.** Concretely: an available
+74,141-game set is ~1.04 doublings and should be worth **~+4.6 points**. Real,
+and worth ingesting; nowhere near sufficient alone.
+
+So "the data constrains the model" is right in direction. Read as "get more data
+and you are done" it is badly wrong about magnitude.
+
+Note the epoch column: 7 -> 87 as data grows. A fixed epoch budget mismeasures
+every cell of a curve like this, and the same is true of the capacity sweep.
+
+### What explains the gap to the learnable ceiling
+
+| hypothesis | verdict |
+|---|---|
+| Ties in the teacher's targets | **No.** The 88.2% ceiling already accounts for them; 22% incidence, mean k~2.2 |
+| Correlated batches (no shuffling) | **Small.** +1.28 points, ~4% of the gap |
+| Data volume | **Yes, but slow.** +4.39/doubling; 124x more games to close it |
 
 ## The trainer specialises to seat 0
 
