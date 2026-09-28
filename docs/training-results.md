@@ -185,8 +185,8 @@ budget. Validation agreement over the held-out 10% (~213k positions):
 3.68, 4.44 — which says the nets overfit rather than underfit, and is consistent
 with data being the binding constraint. Consistent with, not proof of: the gap
 alone cannot distinguish "more data would help" from "the target is only
-partly predictable from this encoding", and validation sits ~32 points below the
-88.2% learnable ceiling measured below. A learning curve over dataset fraction
+partly predictable from this encoding", and validation sits ~28 points below the
+86.1% learnable ceiling measured below. A learning curve over dataset fraction
 (`examples/learning_curve.rs`, fixed validation set, fractions sampled by whole
 game) is the direct test and is not yet run. Larger nets
 peak earlier and then decay for as long as they are allowed to run (2048x2 at
@@ -201,31 +201,59 @@ is genuine overfitting and not an untuned step size.
 
 ## What is learnable from a depth-2 teacher
 
-Measured independently by the exhaustive-search generator (azul-eval-ce), two
-runs at different node budgets. **Regime:** ~260 exact positions from 5 games
-each, positions within a game correlated so true intervals are wider than the
-binomial ones shown; `random_best` off, so ties are broken deterministically
-rather than by coin flip.
+Measured independently by the exhaustive-search generator (azul-eval-ce).
+**Regime:** 10,217 exact positions, 20M-node budget, 4.0% excluded on budget;
+`random_best` off in the *measurement* so ties break deterministically rather
+than by coin flip (note `gen_labels` itself sets it true — see below).
 
 | depth | agrees with exact | mean value lost per decision |
 |---|---|---|
-| 1 | 39% | 1.67 |
-| 2 | 45% | 1.30 |
-| 3 | 51% | 1.16 |
-| 4 | 59% | 0.82 |
-| 6 | 72% | 0.45 |
+| 1 | 42.0% | 1.589 |
+| 2 | 47.3% | 1.344 |
+| 3 | 54.5% | 1.088 |
+| 4 | 60.3% | 0.865 |
+| 6 | 73.1% | 0.452 |
 
-**Learnable ceiling against depth-2 targets: 88.2% [84.3, 92.1]** — 22% of
-positions carry a tie at depth 2's own top value, and a net that ranks perfectly
-still scores 1/k on those. So the 56.41 validation agreement above is **31.8
-points** below what is learnable, and ties do not explain it.
+**Learnable ceiling against depth-2 targets: 86.1% [85.4, 86.8]**, or **~85.4%**
+after correcting for excluded positions. `gen_labels` sets `random_best: true`,
+so where k moves tie at the teacher's best value the recorded target is a uniform
+draw from the tie set — argmax agreement therefore cannot exceed mean(1/k) *by
+construction*, and this measures exactly that. The 57.72 validation agreement
+above is ~28 points below it.
 
-That ceiling is robust to the one bias we knew about. Raising the node budget
-from 3M to 20M cut excluded (budget-exceeded) positions from 11.6% to 4.0%, and
-the ceiling did *not* fall — it rose slightly, 86.5% to 88.2%, well inside both
-intervals. So large-tree positions do not carry more tie mass, contrary to the
-obvious guess; plausibly a large tree means a tactically live position where
-exact search finds real distinctions, while a small tree means a forced one.
+### The ceiling falls with position difficulty, and so does the teacher
+
+| solve cost | n | share | ceiling | depth-2 agreement | gap |
+|---|---|---|---|---|---|
+| <100k nodes | 7,630 | 74.7% | 89.6% | 56.7% | 32.9 |
+| <1M | 1,313 | 12.9% | 79.3% | 21.0% | 58.3 |
+| <10M | 1,130 | 11.1% | 72.6% | 17.7% | 54.9 |
+| >=10M | 144 | 1.4% | 69.7% | 22.9% | 46.8 |
+
+**Depth 2 is not uniformly mediocre — it is nearly adequate on quiet positions
+and close to useless on tactically live ones**, agreeing 56.7% where the solve is
+cheap and 17-23% where it is not. Value lost follows: 1.25 on cheap positions
+against 1.72 and 1.52 in the middle buckets. Since games are decided in the
+sharp positions, a clone trained on depth-2 targets has the most headroom exactly
+where its targets are worst — the ceiling-to-agreement gap widens from 32.9
+points to 58.3.
+
+**Practical consequence:** if the goal is more signal per row rather than more
+rows, upweight or preferentially relabel positions with large solve trees. The
+exhaustive generator records per-position node counts in `meta_*.bin`, so a
+dataset can be filtered on exactly this.
+
+Excluding hard positions biases the ceiling upward, but not by much at 4%:
+bounding the 485 skipped positions by the >=10M bucket's 69.7% gives 85.4%, and
+even at a pessimistic 60% it is 84.9%.
+
+> An earlier version of this section reported 88.2% and claimed large trees carry
+> *less* tie mass. Both were wrong. That came from two samples of ~250 positions
+> with ±4-point intervals, and the mechanism was a story fitted to a difference
+> that was never significant. At 40x the sample the ceiling falls monotonically
+> with solve cost. Worth keeping as a worked example of the same failure the
+> section below describes: a difference inside its own error bars, given an
+> explanation and thereby promoted to a finding.
 
 Note this bounds *imitability*, not quality: **depth 2 concedes ~1.3 points of
 value per decision** against a solved round, over ~50 decisions a game. A net
@@ -298,8 +326,9 @@ would have found it. It only shows up by playing games.
 in sight.
 
 **But the exchange rate makes data a slow lever.** At +4.39 points per doubling,
-closing the 30.5-point gap to the 88.2% learnable ceiling needs **7 doublings —
-124x the current 36,000 games, about 4.5M of them.** Concretely: an available
+closing the ~28-point gap to the 86.1% learnable ceiling needs **6.5 doublings —
+88x the current 36,000 games, about 3.2M of them** (79x against the
+exclusion-corrected 85.4%). Concretely: an available
 74,141-game set is ~1.04 doublings and should be worth **~+4.6 points**. Real,
 and worth ingesting; nowhere near sufficient alone.
 
@@ -313,9 +342,9 @@ every cell of a curve like this, and the same is true of the capacity sweep.
 
 | hypothesis | verdict |
 |---|---|
-| Ties in the teacher's targets | **No.** The 88.2% ceiling already accounts for them; 22% incidence, mean k~2.2 |
+| Ties in the teacher's targets | **No.** The 86.1% ceiling already accounts for them |
 | Correlated batches (no shuffling) | **Small.** +1.28 points, ~4% of the gap |
-| Data volume | **Yes, but slow.** +4.39/doubling; 124x more games to close it |
+| Data volume | **Yes, but slow.** +4.39/doubling; ~88x more games to close it |
 
 ## The trainer specialises to seat 0
 
