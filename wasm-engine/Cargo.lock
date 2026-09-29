@@ -249,6 +249,7 @@ checksum = "cf8baf1c55e62ffcace7a9f06f4bd9cd3f0c4beb022d3b367256b91b87513d98"
 [[package]]
 name = "minimaxer"
 version = "0.1.0"
+source = "git+ssh://git@github.com/domw95/minimaxer-rs.git?rev=8a95028fd41a1611f9dfbaa533b399829fd761b9#8a95028fd41a1611f9dfbaa533b399829fd761b9"
 dependencies = [
  "log",
  "rand",

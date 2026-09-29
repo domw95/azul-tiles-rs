@@ -12,14 +12,12 @@ crate-type = ["cdylib"]
 [dependencies]
 azul-tiles-rs = { path = "..", default-features = false }
 strum = { version = "0.26.3", features = ["derive"] }
-# Redirected to the local minimaxer worktree by the [patch] below.
-minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git", default-features = false }
+# Pinned to the wasm work on minimaxer-rs (PR #2, branch wasm/spike).
+# Becomes a plain master dependency once that merges.
+minimaxer = { git = "ssh://git@github.com/domw95/minimaxer-rs.git", rev = "8a95028fd41a1611f9dfbaa533b399829fd761b9", default-features = false }
 
 [profile.release]
 opt-level = 3
 lto = true
 panic = "abort"
 
-# Patches only apply from the workspace root, which for this crate is itself.
-[patch."ssh://git@github.com/domw95/minimaxer-rs.git"]
-minimaxer = { path = "../../mx-wasm" }
