@@ -78,18 +78,24 @@ a human taking a few seconds.
 
 ### Blockers for merging
 
-- `azul-tiles-rs/Cargo.toml`, `wasm-bench/Cargo.toml` and
-  `wasm-engine/Cargo.toml` carry `[patch]` sections pointing at a sibling
-  `minimaxer-rs` worktree by relative path. Spike convenience. They want
-  replacing with a git revision, now that the fixes are on `minimaxer-rs`
-  master.
-- `tiles-web` does not build from a clean clone: `setup.ts` imports
-  `ParanoidAI`, which the published `azul-tiles` 3.3.0 does not export. This
-  predates the spike, but it blocks a deploy from a fresh checkout. Either
-  publish `azul-tiles` or pin a file dependency.
+- ~~`[patch]` sections pointing at a sibling worktree~~ **fixed**: the three
+  manifests now pin minimaxer to a revision on `wasm/spike`, so the tree
+  resolves from GitHub. Becomes a plain master dependency once
+  `minimaxer-rs` PR #2 merges.
+- ~~`tiles-web` does not build from a clean clone~~ **fixed**: it depends on
+  `azul-tiles` by git rather than waiting for a release. That needed
+  `azul-tiles` to be installable from git at all, which it was not -- its
+  `prepare` ran a lint that cannot pass before the build it gates has produced
+  `dist/`. See `azul-tiles` PR #34. Verified end to end on a fresh clone.
 - `azul-bench`'s runner defaults point at worktree paths, which go stale once
   those are cleaned up. Repoint at the main checkouts when `bench/xlang`
   merges.
+
+### Merge order
+
+The pins mean these want landing in order: `minimaxer-rs` #2, then
+`azul-tiles` #34, then the rest. Each pinned dependency reverts to a plain
+master reference as its upstream merges.
 
 ### Known divergence, not a bug
 
