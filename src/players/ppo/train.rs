@@ -562,8 +562,26 @@ impl<B: AutodiffBackend> PPOTrainer<B> {
             evals_seen += 1;
             let warm = evals_seen >= warmup;
 
-            if warm && smooth > best_saved_smooth {
-                best_saved_smooth = smooth;
+            // Two requirements that must not be conflated, which the first cut
+            // of this warm-up did conflate:
+            //
+            //   1. A run must always leave a usable checkpoint. Callers ask for
+            //      "best" without knowing how long the run was, so a short run
+            //      that writes nothing turns into a missing-file panic far from
+            //      the cause.
+            //   2. An unwarmed statistic must not set a high-water mark, which
+            //      is the whole point of the warm-up.
+            //
+            // Satisfying both: before the series is warm, overwrite "best" with
+            // the *current* policy every eval -- so a checkpoint always exists
+            // and is always the latest rather than a lucky early draw -- while
+            // leaving `best_saved_smooth` at negative infinity. The first warm
+            // eval therefore always saves, and nothing from the noisy phase can
+            // lock out the rest of the run.
+            if !warm || smooth > best_saved_smooth {
+                if warm {
+                    best_saved_smooth = smooth;
+                }
                 best = eval;
                 best_episode = episode;
                 ppo.save(&options.dir, "best").unwrap();
