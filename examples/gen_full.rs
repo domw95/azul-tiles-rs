@@ -477,9 +477,30 @@ fn main() {
                 break 'outer;
             }
             let n = shard.data.len();
-            shard.data.save_shard(&out.join(format!("shard_{tag}{next_shard:04}.bin"))).unwrap();
-            shard.replay.save(&out.join(format!("replay_{tag}{next_shard:04}.bin"))).unwrap();
-            shard.meta.save(&out.join(format!("meta_{tag}{next_shard:04}.bin"))).unwrap();
+            // Write to a temporary name and rename into place, so a reader can
+            // index this directory while the fleet is still writing to it.
+            //
+            // The savers are `File::create` plus a `BufWriter`, and the length
+            // header goes down before the bulk, so a shard caught mid-write
+            // claims more positions than the file holds -- and `load_shard`
+            // slices on that count unconditionally, so a reader panics on a
+            // range out of bounds rather than getting short data it could
+            // detect. Rename within a directory is atomic, which turns a
+            // half-written file into one that is simply not there yet.
+            //
+            // The temporary name must not begin with `shard_`, `replay_` or
+            // `meta_`: `ShardSet::open` and `MultiDataset::load_dir` both
+            // select on those prefixes, so a `shard_0001.bin.tmp` would be
+            // indexed as a shard and reintroduce exactly the race this avoids.
+            let publish = |stem: &str, write: &dyn Fn(&Path) -> std::io::Result<()>| {
+                let final_path = out.join(format!("{stem}_{tag}{next_shard:04}.bin"));
+                let tmp = out.join(format!(".tmp_{stem}_{tag}{next_shard:04}.bin"));
+                write(&tmp).unwrap();
+                std::fs::rename(&tmp, &final_path).unwrap();
+            };
+            publish("shard", &|p| shard.data.save_shard(p));
+            publish("replay", &|p| shard.replay.save(p));
+            publish("meta", &|p| shard.meta.save(p));
             next_shard += 1;
             shard = Shard::new();
 
